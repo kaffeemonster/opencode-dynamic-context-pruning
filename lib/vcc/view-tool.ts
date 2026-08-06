@@ -19,7 +19,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
 
     return tool({
         description:
-            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results.",
+            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance).",
         args: {
             pattern: tool.schema
                 .string()
@@ -40,14 +40,19 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 .boolean()
                 .optional()
                 .describe("Search the brief/min view instead of full content"),
+            query: tool.schema
+                .string()
+                .optional()
+                .describe("Natural-language text search (BM25 ranking) — alternative to regex pattern"),
         },
         async execute(args, toolCtx) {
-            const { pattern, sessions, session, limit, brief } = args as {
+            const { pattern, sessions, session, limit, brief, query } = args as {
                 pattern: string
                 sessions?: boolean
                 session?: string
                 limit?: number
                 brief?: boolean
+                query?: string
             }
 
             if (!viewConfig.enabled) {
@@ -145,8 +150,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
             const vccArgs = [
                 viewConfig.scriptPath,
                 exportPath,
-                "--grep",
-                pattern,
+                ...(query ? ["--search", query] : ["--grep", pattern]),
                 "--limit",
                 String(limit ?? 40),
                 ...(brief === true ? ["--brief"] : []),
@@ -165,32 +169,50 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 })
             })
 
-            // Read the .view.txt if it exists
-            const viewPath = exportPath.replace(/\.jsonl$/, ".view.txt")
-            let viewContent = ""
-            try {
-                viewContent = await fs.readFile(viewPath, "utf-8")
-            } catch {
-                // .view.txt only written when matches exist
+            if (!query) {
+                // Read the .view.txt if it exists (grep mode only — BM25 search
+                // never writes a view file)
+                const viewPath = exportPath.replace(/\.jsonl$/, ".view.txt")
+                let viewContent = ""
+                try {
+                    viewContent = await fs.readFile(viewPath, "utf-8")
+                } catch {
+                    // .view.txt only written when matches exist
+                }
+
+                if (viewContent.trim()) {
+                    const resultText =
+                        `**VCC grep matches for \`${pattern}\`:**\n\n` +
+                        viewContent +
+                        `\n\nFull transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}`
+                    return truncateOutput(
+                        resultText,
+                        "more matches — refine pattern (add .* or narrow terms) or read Full transcript:" +
+                            exportPath.replace(/\.jsonl$/, ".txt"),
+                    )
+                }
+
+                return (
+                    `VCC grep for \`${pattern}\` found no matches in the current session view.\n` +
+                    `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
+                    `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}\n` +
+                    `Compiler output:\n${truncateOutput(output, "compiler output truncated")}`
+                )
             }
 
-            if (viewContent.trim()) {
-                const resultText =
-                    `**VCC grep matches for \`${pattern}\`:**\n\n` +
-                    viewContent +
+            // BM25 search mode: stdout IS the ranked result
+            if (output.trim()) {
+                return (
+                    `**VCC search matches for \`${query}\`:**\n\n` +
+                    output +
                     `\n\nFull transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}`
-                return truncateOutput(
-                    resultText,
-                    "more matches — refine pattern (add .* or narrow terms) or read Full transcript:" +
-                        exportPath.replace(/\.jsonl$/, ".txt"),
                 )
             }
 
             return (
-                `VCC grep for \`${pattern}\` found no matches in the current session view.\n` +
+                `VCC search for \`${query}\` found no matches in the current session view.\n` +
                 `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
-                `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}\n` +
-                `Compiler output:\n${truncateOutput(output, "compiler output truncated")}`
+                `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}`
             )
         },
     })

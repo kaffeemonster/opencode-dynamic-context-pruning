@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import glob as globmod
+import math
 
 # ── dict emitter ──
 
@@ -1001,6 +1002,193 @@ def grep_search(results, pattern, limit=0, brief=False):
                 return
 
 
+# ── BM25 text search ──
+
+_STOPWORDS_EN = frozenset(
+    "a an and are as at be but by for from has have he her his i if in is it its "
+    "of on or our she so that the their them then there they this to was we were "
+    "what when which who will with you your not no do does did can could would "
+    "should may might must about into over under up down out off again once also "
+    "just very than too more most some any each own same other only new now "
+    "here where why how all because before after while during"
+    .split()
+)
+
+_STOPWORDS_DE = frozenset(
+    "aber als am an auch auf aus bei beim bin bis bist das dass dem den der des "
+    "die dieser diese dieses diesen diesem doch dort du durch ein eine einem einen "
+    "einer eines er es euch euer für gegen gewesen gibt habe haben hat hatte "
+    "hier hin hinter ich ihm ihn ihre ihr im in ist ja jeder jedes jetzt kann "
+    "können konnte kein keine keinen keinem keiner machen man mich mir mit muss "
+    "müssen nach nicht nichts noch nun nur ob oder ohne sehr sein seine sich sie "
+    "sind so soll sollte sondern sonst über um und uns unter vom von vor war "
+    "waren warum was weg weil weiter welche welchem welchen welcher welches wenn "
+    "wer werde werden wie wieder will wir wird wo wohl wollen womit wozu zu zum "
+    "zur zwar zwischen"
+    .split()
+)
+
+_STOPWORDS = _STOPWORDS_EN | _STOPWORDS_DE
+
+def _is_cjk(ch):
+    cp = ord(ch)
+    return (
+        0x4E00 <= cp <= 0x9FFF or  # CJK Unified
+        0x3400 <= cp <= 0x4DBF or  # Ext A
+        0x3040 <= cp <= 0x30FF or  # Hiragana/Katakana
+        0xAC00 <= cp <= 0xD7AF     # Hangul
+    )
+
+def _tokenize_bm25(text):
+    """Lowercase, split on non-alnum; CJK runs → char bigrams."""
+    tokens = []
+    cjk_buf = []
+    for ch in text.lower():
+        if _is_cjk(ch):
+            cjk_buf.append(ch)
+            continue
+        if cjk_buf:
+            run = "".join(cjk_buf)
+            if len(run) == 1:
+                tokens.append(run)
+            else:
+                tokens.extend(run[i:i+2] for i in range(len(run) - 1))
+            cjk_buf = []
+        if ch.isalnum():
+            tokens.append(ch)
+    if cjk_buf:
+        run = "".join(cjk_buf)
+        if len(run) == 1:
+            tokens.append(run)
+        else:
+            tokens.extend(run[i:i+2] for i in range(len(run) - 1))
+    return tokens
+
+def _stem_basic(w):
+    """Very basic suffix-stripping stemmer (stdlib-pure)."""
+    if len(w) <= 3:
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("ing"):
+        return w[:-3]
+    if w.endswith("ed"):
+        return w[:-2]
+    if w.endswith("ly"):
+        return w[:-2]
+    if w.endswith("es") and not w.endswith(("ses", "xes", "zes", "ches", "shes")):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith(("ss", "us")):
+        return w[:-1]
+    return w
+
+def _stem_german(w):
+    """Very basic German suffix stripper (stdlib-pure). Over-stemming is
+    acceptable: query and document must only agree with each other."""
+    if len(w) <= 3:
+        return w
+    if w.startswith("ge") and len(w) > 5:
+        w = w[2:]              # gemacht -> macht
+    if w.endswith("ung"):
+        w = w[:-3]
+    if w.endswith("en") or w.endswith("ern"):
+        w = w[:-2]
+    elif w.endswith("e"):
+        w = w[:-1]
+    elif w.endswith("est"):
+        w = w[:-3]
+    elif w.endswith("st") and len(w) > 4:
+        w = w[:-2]             # machst -> mach
+    elif w.endswith("te") and len(w) > 4:
+        w = w[:-2]             # machte -> mach
+    elif w.endswith("er"):
+        w = w[:-2]             # Spieler -> Spiel
+    elif w.endswith("es"):
+        w = w[:-2]
+    if w.endswith("t") and len(w) > 3 and not w.endswith(("hat", "mit", "ist", "bit")):
+        w = w[:-1]             # macht -> mach (guarded)
+    return w
+
+def _analyze(text):
+    out = []
+    for t in _tokenize_bm25(text):
+        if t in _STOPWORDS:
+            continue
+        out.append(_stem_basic(_stem_german(t)))
+    return out
+
+def _bm25_scores(docs, query_terms, k1=1.2, b=0.75):
+    """docs: list of token lists. Returns list of floats (same order)."""
+    n = len(docs)
+    if n == 0 or not query_terms:
+        return [0.0] * n
+    doc_lens = [len(d) for d in docs]
+    avgdl = sum(doc_lens) / n
+    df = {}
+    for d in docs:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    scores = []
+    for i, d in enumerate(docs):
+        tf = {}
+        for t in d:
+            tf[t] = tf.get(t, 0) + 1
+        s = 0.0
+        dl = doc_lens[i]
+        for t in query_terms:
+            f = tf.get(t, 0)
+            if not f:
+                continue
+            idf = math.log(1 + (n - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5))
+            s += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl)) + idf * 1.0
+        scores.append(s)
+    return scores
+
+def bm25_search(results, query, limit=0, brief=False):
+    query_terms = _analyze(query)
+    if not query_terms:
+        print("No searchable terms in query.")
+        return
+    # Build corpus: one doc per searchable block, keyed to (filepath, o)
+    corpus = []      # (filepath, o)
+    docs = []        # token list per corpus entry
+    for filepath, ir in results:
+        for o in ir:
+            if not o["searchable"]:
+                continue
+            src = o["content_brief"] if brief else o["content"]
+            if not src:
+                continue
+            text = "\n".join(src)
+            toks = _analyze(text)
+            if toks:
+                corpus.append((filepath, o))
+                docs.append(toks)
+    scores = _bm25_scores(docs, query_terms)
+    ranked = sorted(range(len(corpus)), key=lambda i: scores[i], reverse=True)
+    count = 0
+    first = True
+    for i in ranked:
+        sc = scores[i]
+        if sc <= 0:
+            continue
+        filepath, o = corpus[i]
+        short = _rel_path(filepath)
+        ts = o.get("_event_timestamp")
+        ts_suffix = f" event={ts}" if ts else ""
+        start = o.get("start_line", 0) + 1
+        if not first:
+            print()
+        first = False
+        print(f"({short}:{start}-{start}) [{o['type']}] score={sc:.2f}{ts_suffix}")
+        src = o["content_brief"] if brief else o["content"]
+        for line in (src or [])[:8]:
+            print(f"   {line}")
+        count += 1
+        if limit and count >= limit:
+            return
+
+
 # ── compile ──
 
 def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
@@ -1087,19 +1275,25 @@ def main():
                    help="Max block matches to report per file (0 = unlimited)")
     p.add_argument("--brief", action="store_true",
                    help="Search brief (min) view content instead of full content")
+    p.add_argument("--search", metavar="QUERY",
+                   help="BM25 text search (instead of regex grep)")
     a = p.parse_args()
     try:
         a.grep = re.compile(a.grep) if a.grep else None
     except re.error as e:
         p.error(f"invalid regex for --grep: {e}")
+    if a.grep and a.search:
+        p.error("use --grep OR --search, not both")
     all_results = []
     for f in _expand_inputs(a.input):
         res = compile_pass(f, a.output_dir, a.truncate, a.truncate_user,
-                      a.grep, quiet=bool(a.grep),
+                      a.grep, quiet=bool(a.grep or a.search),
                       grep_limit=a.limit, grep_brief=a.brief)
         all_results.extend(res)
     if a.grep:
         grep_search(all_results, a.grep, a.limit, a.brief)
+    if a.search:
+        bm25_search(all_results, a.search, a.limit, a.brief)
 
 if __name__ == "__main__":
     if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
