@@ -1040,11 +1040,15 @@ def _is_cjk(ch):
     )
 
 def _tokenize_bm25(text):
-    """Lowercase, split on non-alnum; CJK runs → char bigrams."""
+    """Lowercase, split on non-alnum into words; CJK runs → char bigrams."""
     tokens = []
+    word_buf = []
     cjk_buf = []
     for ch in text.lower():
         if _is_cjk(ch):
+            if word_buf:
+                tokens.append("".join(word_buf))
+                word_buf = []
             cjk_buf.append(ch)
             continue
         if cjk_buf:
@@ -1055,13 +1059,19 @@ def _tokenize_bm25(text):
                 tokens.extend(run[i:i+2] for i in range(len(run) - 1))
             cjk_buf = []
         if ch.isalnum():
-            tokens.append(ch)
+            word_buf.append(ch)
+        else:
+            if word_buf:
+                tokens.append("".join(word_buf))
+                word_buf = []
     if cjk_buf:
         run = "".join(cjk_buf)
         if len(run) == 1:
             tokens.append(run)
         else:
             tokens.extend(run[i:i+2] for i in range(len(run) - 1))
+    if word_buf:
+        tokens.append("".join(word_buf))
     return tokens
 
 def _stem_basic(w):
@@ -1117,71 +1127,206 @@ def _analyze(text):
         out.append(_stem_basic(_stem_german(t)))
     return out
 
-def _bm25_scores(docs, query_terms, k1=1.2, b=0.75):
-    """docs: list of token lists. Returns list of floats (same order)."""
+def _bm25f_score(tf_map, dl, avgdl, query_terms, idf_cache, k1=1.2, b=0.75):
+    """BM25+ (delta=1.0) for ONE field of ONE doc."""
+    s = 0.0
+    for t in query_terms:
+        f = tf_map.get(t, 0)
+        if not f:
+            continue
+        idf = idf_cache.get(t, 0.0)
+        s += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl)) + idf * 1.0
+    return s
+
+
+def _bm25f_scores(docs, query_terms, field_weights, k1=1.2, b=0.75):
+    """
+    docs: list of (tokens_full, tokens_brief) tuples (either may be []).
+    field_weights: dict {'full': float, 'brief': float} (default {'full':1.0,'brief':1.4}).
+    Returns list of floats (same order as docs).
+    """
     n = len(docs)
     if n == 0 or not query_terms:
         return [0.0] * n
-    doc_lens = [len(d) for d in docs]
-    avgdl = sum(doc_lens) / n
-    df = {}
-    for d in docs:
+    # Per-field corpora for df/idf and avgdl
+    corp_full = [d[0] for d in docs]
+    corp_brief = [d[1] for d in docs]
+    avg_full = sum(len(d) for d in corp_full) / max(n, 1)
+    avg_brief = sum(len(d) for d in corp_brief) / max(n, 1)
+    df_full, df_brief = {}, {}
+    for d in corp_full:
         for t in set(d):
-            df[t] = df.get(t, 0) + 1
-    scores = []
-    for i, d in enumerate(docs):
-        tf = {}
-        for t in d:
-            tf[t] = tf.get(t, 0) + 1
+            df_full[t] = df_full.get(t, 0) + 1
+    for d in corp_brief:
+        for t in set(d):
+            df_brief[t] = df_brief.get(t, 0) + 1
+    def _idf(n_docs, df):
+        return {t: math.log(1 + (n_docs - f + 0.5) / (f + 0.5)) for t, f in df.items()}
+    idf_full = _idf(n, df_full)
+    idf_brief = _idf(n, df_brief)
+    out = []
+    for i, (tok_full, tok_brief) in enumerate(docs):
         s = 0.0
-        dl = doc_lens[i]
-        for t in query_terms:
-            f = tf.get(t, 0)
-            if not f:
-                continue
-            idf = math.log(1 + (n - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5))
-            s += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl)) + idf * 1.0
-        scores.append(s)
-    return scores
+        if tok_full and avg_full > 0 and field_weights.get('full', 0):
+            tf_full = {}
+            for t in tok_full:
+                tf_full[t] = tf_full.get(t, 0) + 1
+            s += field_weights['full'] * _bm25f_score(
+                tf_full, len(tok_full), avg_full, query_terms, idf_full, k1, b)
+        if tok_brief and avg_brief > 0 and field_weights.get('brief', 0):
+            tf_brief = {}
+            for t in tok_brief:
+                tf_brief[t] = tf_brief.get(t, 0) + 1
+            s += field_weights['brief'] * _bm25f_score(
+                tf_brief, len(tok_brief), avg_brief, query_terms, idf_brief, k1, b)
+        out.append(s)
+    return out
 
-def bm25_search(results, query, limit=0, brief=False):
+# pi-vcc-style importance priors (query-independent, additive boost)
+_PRIOR_SCALE = 0.2          # keep prior modest vs BM25 score (~0-10)
+_EDIT_TOOL_RE = re.compile(r"^(edit|write|multiedit|quick_edit|target_edit|apply_patch)$", re.I)
+_READ_TOOL_RE = re.compile(r"^(read|glob|grep|ls|find|search|view)$", re.I)
+_WORKFLOW_TOOL_RE = re.compile(
+    r"^(git|gh|npm|npx|yarn|pnpm|cargo|make|docker|docker-compose|kubectl|terraform|"
+    r"pip|pip3|apt|apt-get|dnf|pacman|emerge|systemctl|ssh|scp|rsync|curl|wget)$", re.I)
+_TEST_CMD_RE = re.compile(
+    r"^(pytest|python -m pytest|go test|npm test|npm run test|cargo test|make test|"
+    r"yarn test|pnpm test|mix test|rake test|ctest|mvn test|gradle test|zig test)\b")
+_TRIVIAL_BASH_RE = re.compile(r"^(ls|pwd|echo|cd|cat|head|tail|wc|date|whoami|env|"
+    r"git status|git diff|git log)\b")
+
+def _node_prior(o, cur_tool, content_lines):
+    """Query-independent importance prior, pi-vcc-inspired."""
+    typ = o["type"]
+    if typ == "user":
+        return 18
+    if typ == "assistant":
+        return 10
+    if typ in ("thinking", "redacted_thinking"):
+        return -8
+    if typ == "system":
+        return 5
+    if typ == "tool_error":
+        return 24
+    if typ == "tool_result":
+        p = 1
+        if len(content_lines) > 300:
+            p -= 8
+        return p
+    if typ == "tool_call":
+        name = (cur_tool or "").lower()
+        if _EDIT_TOOL_RE.match(name):
+            return 34
+        if name == "bash":
+            first = (content_lines[0] if content_lines else "").strip()
+            if _TEST_CMD_RE.match(first):
+                return 26
+            if _TRIVIAL_BASH_RE.match(first) and len(" ".join(content_lines)) < 80:
+                return -16
+            return 12
+        if _WORKFLOW_TOOL_RE.match(name):
+            return 14
+        if _READ_TOOL_RE.match(name):
+            return 6
+        return 12
+    return 0
+
+def bm25_search(results, query, limit=0, brief=False, fusion=False):
     query_terms = _analyze(query)
     if not query_terms:
         print("No searchable terms in query.")
         return
-    # Build corpus: one doc per searchable block, keyed to (filepath, o)
-    corpus = []      # (filepath, o)
-    docs = []        # token list per corpus entry
+    # Corpus: one doc per searchable node, with per-node tool context + prior.
+    corpus = []   # (filepath, o, prior)
+    tf_pairs = [] # (tf_full_token_list, tf_brief_token_list) — token LISTS, counted later
+    dedup_seen = set()
     for filepath, ir in results:
+        section_ts = {
+            o.get("_sec"): o.get("_event_timestamp")
+            for o in ir
+            if o.get("type") == "meta_header" and o.get("_sec") is not None
+        }
+        cur_tool = None
         for o in ir:
-            if not o["searchable"]:
+            # Track current tool name from meta headers
+            if o["type"] == "meta":
+                first = (o.get("content") or [""])[0]
+                if first.startswith(">>>tool_call "):
+                    cur_tool = first[len(">>>tool_call "):].split(":")[0]
                 continue
-            src = o["content_brief"] if brief else o["content"]
-            if not src:
+            if o["type"] == "meta_header":
+                first = (o.get("content") or [""])[0]
+                m = re.match(r"^\[(?:tool|tool_error)\] (\S+):", first)
+                if m:
+                    cur_tool = m.group(1)
                 continue
-            text = "\n".join(src)
-            toks = _analyze(text)
-            if toks:
-                corpus.append((filepath, o))
-                docs.append(toks)
-    scores = _bm25_scores(docs, query_terms)
-    ranked = sorted(range(len(corpus)), key=lambda i: scores[i], reverse=True)
+            if not o.get("searchable"):
+                continue
+            full_src = o.get("content") or []
+            brief_src = o.get("content_brief") or []
+            if not full_src and not brief_src:
+                continue
+            text_full = "\n".join(full_src)
+            # Dedup: (tool, first meaningful line) — collapse repeated identical calls
+            dkey = None
+            if cur_tool == "bash":
+                norm = re.sub(r"\s+", " ", text_full)[:80]
+                dkey = ("bash", norm)
+            elif cur_tool:
+                dkey = (cur_tool, (full_src[0] if full_src else "")[:80])
+            if dkey is not None:
+                if dkey in dedup_seen:
+                    continue
+                dedup_seen.add(dkey)
+            prior = _node_prior(o, cur_tool, full_src)
+            corpus.append((filepath, o, prior, section_ts.get(o.get("_sec"))))
+            # Skip brief field when it duplicates full content (common case) —
+            # double-counting inflates scores ~2x.
+            brief_toks = []
+            if brief_src and brief_src != full_src:
+                brief_toks = _analyze("\n".join(brief_src))
+            tf_pairs.append((_analyze(text_full), brief_toks))
+
+    if not corpus:
+        print("No searchable blocks in session.")
+        return
+
+    n = len(corpus)
+    if fusion:
+        # RRF: fuse two ranked lists (full-weighted + brief-weighted), k=60
+        scores_full = _bm25f_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 0.0})
+        scores_brief = _bm25f_scores(tf_pairs, query_terms, {'full': 0.0, 'brief': 1.4})
+        rrf = {i: 0.0 for i in range(n)}
+        for scores in (scores_full, scores_brief):
+            for rank, i in enumerate(sorted(range(n), key=lambda j: scores[j], reverse=True)):
+                if scores[i] <= 0:
+                    continue
+                rrf[i] += 1.0 / (60 + rank + 1)
+        ranked = sorted(range(n), key=lambda i: rrf[i], reverse=True)
+        def _score_of(i):
+            return rrf[i]
+    else:
+        # BM25F single pass: full 1.0 + brief 1.4
+        scores = _bm25f_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 1.4})
+        ranked = sorted(range(n), key=lambda i: scores[i] + _PRIOR_SCALE * corpus[i][2], reverse=True)
+        def _score_of(i):
+            return scores[i] + _PRIOR_SCALE * corpus[i][2]
+
     count = 0
     first = True
     for i in ranked:
-        sc = scores[i]
+        sc = _score_of(i)
         if sc <= 0:
             continue
-        filepath, o = corpus[i]
+        filepath, o, prior, ts = corpus[i]
         short = _rel_path(filepath)
-        ts = o.get("_event_timestamp")
         ts_suffix = f" event={ts}" if ts else ""
         start = o.get("start_line", 0) + 1
         if not first:
             print()
         first = False
         print(f"({short}:{start}-{start}) [{o['type']}] score={sc:.2f}{ts_suffix}")
-        src = o["content_brief"] if brief else o["content"]
+        src = o.get("content_brief") if brief else o.get("content")
         for line in (src or [])[:8]:
             print(f"   {line}")
         count += 1
@@ -1277,6 +1422,8 @@ def main():
                    help="Search brief (min) view content instead of full content")
     p.add_argument("--search", metavar="QUERY",
                    help="BM25 text search (instead of regex grep)")
+    p.add_argument("--fusion", action="store_true",
+                   help="RRF-fuse full and brief BM25F ranked lists (k=60)")
     a = p.parse_args()
     try:
         a.grep = re.compile(a.grep) if a.grep else None
@@ -1293,7 +1440,7 @@ def main():
     if a.grep:
         grep_search(all_results, a.grep, a.limit, a.brief)
     if a.search:
-        bm25_search(all_results, a.search, a.limit, a.brief)
+        bm25_search(all_results, a.search, a.limit, a.brief, a.fusion)
 
 if __name__ == "__main__":
     if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
