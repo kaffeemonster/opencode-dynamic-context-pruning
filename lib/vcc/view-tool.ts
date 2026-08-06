@@ -123,7 +123,10 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                             : msg.info.role === "assistant"
                               ? "assistant"
                               : "system",
-                    timestamp: new Date().toISOString(),
+                    timestamp:
+                        typeof msg.info.time?.created === "number"
+                            ? new Date(msg.info.time.created).toISOString()
+                            : new Date().toISOString(),
                     message: { content: content.length ? content : [] },
                 })
             }

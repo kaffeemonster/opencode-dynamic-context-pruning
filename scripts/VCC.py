@@ -338,6 +338,7 @@ def parse(chain, outdir, data_prefix, data_ctr):
     ir = []
     sec = 0
     blk = 0
+    active_timestamp = None
 
     tid_name = {}
     for r in chain:
@@ -351,7 +352,8 @@ def parse(chain, outdir, data_prefix, data_ctr):
             ir.append(_node("meta", ["", SEP]))
 
     def _emit_header(h):
-        ir.append(_node("meta_header", [h, ""], _sec=sec))
+        ir.append(_node("meta_header", [h, ""], _sec=sec,
+                        _event_timestamp=active_timestamp))
 
     def _emit_blocks(blocks, text_type):
         nonlocal blk
@@ -419,6 +421,7 @@ def parse(chain, outdir, data_prefix, data_ctr):
 
     for r in chain:
         rt = r.get("type")
+        active_timestamp = r.get("timestamp")
 
         if rt == "system":
             if r.get("subtype") == "compact_boundary": continue
@@ -975,6 +978,11 @@ def grep_search(results, pattern, limit=0, brief=False):
     count = 0
     for filepath, ir in reversed(results):
         short = _rel_path(filepath)
+        section_ts = {
+            o.get("_sec"): o.get("_event_timestamp")
+            for o in ir
+            if o.get("type") == "meta_header" and o.get("_sec") is not None
+        }
         for o in reversed(ir):
             if not o["searchable"]: continue
             src = o["content_brief"] if brief else o["content"]
@@ -984,7 +992,9 @@ def grep_search(results, pattern, limit=0, brief=False):
             count += 1
             if not first: print()
             first = False
-            print(f"{lines[0]} [{o['type']}]")
+            ts = section_ts.get(o.get("_sec"))
+            ts_suffix = f" event={ts}" if ts else ""
+            print(f"{lines[0]} [{o['type']}]{ts_suffix}")
             for lt in lines[1:]:
                 print(lt)
             if limit and count >= limit:

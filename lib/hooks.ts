@@ -509,7 +509,9 @@ async function exportSessionForVcc(
 
         records.push({
             type: msg.info.role === "user" ? "user" : msg.info.role === "assistant" ? "assistant" : "system",
-            timestamp: typeof msg.info.time === "number" ? new Date(msg.info.time).toISOString() : new Date().toISOString(),
+            timestamp: typeof msg.info.time?.created === "number"
+                ? new Date(msg.info.time.created).toISOString()
+                : new Date().toISOString(),
             message: {
                 content: content.length ? content : [],
             },
