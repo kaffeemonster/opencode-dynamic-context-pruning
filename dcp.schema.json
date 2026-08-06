@@ -394,7 +394,7 @@
                 },
                 "pythonPath": {
                     "type": "string",
-                    "default": "python",
+                    "default": "python3",
                     "description": "Python interpreter used to run VCC.py"
                 },
                 "scriptPath": {

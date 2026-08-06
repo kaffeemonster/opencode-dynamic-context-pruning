@@ -577,7 +577,7 @@ async function handleViewCompileCommand(cmdCtx: {
     const exportPath = await exportSessionForVcc(cmdCtx.state, cmdCtx.messages, cmdCtx.logger, cmdCtx.config.view?.exportDir)
 
     runVccCompile(
-        viewConfig.pythonPath || "python",
+        viewConfig.pythonPath || "python3",
         scriptPath,
         exportPath,
         grepPattern,
@@ -656,7 +656,7 @@ async function runAutoVccPipeline(
 
     // Compile with VCC
     const output = await runVccCompile(
-        viewConfig.pythonPath || "python",
+        viewConfig.pythonPath || "python3",
         scriptPath,
         exportPath,
         undefined,

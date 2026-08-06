@@ -149,7 +149,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 ...(brief === true ? ["--brief"] : []),
             ]
             const output = await new Promise<string>((resolve, reject) => {
-                execFile(viewConfig.pythonPath || "python", vccArgs, { maxBuffer: 20 * 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+                execFile(viewConfig.pythonPath || "python3", vccArgs, { maxBuffer: 20 * 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
                     if (error) {
                         reject(
                             new Error(

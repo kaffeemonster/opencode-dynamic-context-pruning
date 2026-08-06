@@ -916,7 +916,7 @@ const defaultConfig: PluginConfig = {
     },
     view: {
         enabled: false,
-        pythonPath: "python",
+        pythonPath: "python3",
         scriptPath: join(PLUGIN_ROOT, "scripts", "VCC.py"),
         exportDir: "",
         autoExport: false,

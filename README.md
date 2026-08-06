@@ -273,7 +273,7 @@ To enable, set `view.enabled: true` and point `view.scriptPath` at your `VCC.py`
 ```jsonc
 "view": {
     "enabled": true,
-    "pythonPath": "python",
+    "pythonPath": "python3",
     "scriptPath": "/path/to/VCC.py",
     "exportDir": "",            // default: <data-dir>/plugin/dcp/vcc
     "autoExport": false,        // re-export + compile after each compression
