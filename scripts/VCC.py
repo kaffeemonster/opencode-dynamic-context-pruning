@@ -1182,6 +1182,59 @@ def _bm25f_scores(docs, query_terms, field_weights, k1=1.2, b=0.75):
         out.append(s)
     return out
 
+
+def _bm25l_score(tf_map, dl, avgdl, query_terms, idf_cache, delta=0.5, k1=1.2, b=0.75):
+    """BM25L: length-normalize tf first, then saturate (no b inside)."""
+    s = 0.0
+    denom = dl / avgdl + b if avgdl > 0 else 1.0
+    for t in query_terms:
+        f = tf_map.get(t, 0)
+        if not f:
+            continue
+        tf_star = delta + f * (1 + b) / denom
+        idf = idf_cache.get(t, 0.0)
+        s += idf * (tf_star * (k1 + 1)) / (tf_star + k1)
+    return s
+
+
+def _bm25l_scores(docs, query_terms, field_weights, delta=0.5, k1=1.2, b=0.75):
+    """BM25L multi-field variant; same signature shape as _bm25f_scores."""
+    n = len(docs)
+    if n == 0 or not query_terms:
+        return [0.0] * n
+    corp_full = [d[0] for d in docs]
+    corp_brief = [d[1] for d in docs]
+    avg_full = sum(len(d) for d in corp_full) / max(n, 1)
+    avg_brief = sum(len(d) for d in corp_brief) / max(n, 1)
+    df_full, df_brief = {}, {}
+    for d in corp_full:
+        for t in set(d):
+            df_full[t] = df_full.get(t, 0) + 1
+    for d in corp_brief:
+        for t in set(d):
+            df_brief[t] = df_brief.get(t, 0) + 1
+    def _idf(n_docs, df):
+        return {t: math.log(1 + (n_docs - f + 0.5) / (f + 0.5)) for t, f in df.items()}
+    idf_full = _idf(n, df_full)
+    idf_brief = _idf(n, df_brief)
+    out = []
+    for i, (tok_full, tok_brief) in enumerate(docs):
+        s = 0.0
+        if tok_full and avg_full > 0 and field_weights.get('full', 0):
+            tf_full = {}
+            for t in tok_full:
+                tf_full[t] = tf_full.get(t, 0) + 1
+            s += field_weights['full'] * _bm25l_score(
+                tf_full, len(tok_full), avg_full, query_terms, idf_full, delta, k1, b)
+        if tok_brief and avg_brief > 0 and field_weights.get('brief', 0):
+            tf_brief = {}
+            for t in tok_brief:
+                tf_brief[t] = tf_brief.get(t, 0) + 1
+            s += field_weights['brief'] * _bm25l_score(
+                tf_brief, len(tok_brief), avg_brief, query_terms, idf_brief, delta, k1, b)
+        out.append(s)
+    return out
+
 # pi-vcc-style importance priors (query-independent, additive boost)
 _PRIOR_SCALE = 0.2          # keep prior modest vs BM25 score (~0-10)
 _EDIT_TOOL_RE = re.compile(r"^(edit|write|multiedit|quick_edit|target_edit|apply_patch)$", re.I)
@@ -1231,7 +1284,7 @@ def _node_prior(o, cur_tool, content_lines):
         return 12
     return 0
 
-def bm25_search(results, query, limit=0, brief=False, fusion=False):
+def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False):
     query_terms = _analyze(query)
     if not query_terms:
         print("No searchable terms in query.")
@@ -1293,11 +1346,15 @@ def bm25_search(results, query, limit=0, brief=False, fusion=False):
 
     n = len(corpus)
     if fusion:
-        # RRF: fuse two ranked lists (full-weighted + brief-weighted), k=60
-        scores_full = _bm25f_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 0.0})
-        scores_brief = _bm25f_scores(tf_pairs, query_terms, {'full': 0.0, 'brief': 1.4})
+        # RRF: fuse four ranked lists (BM25F + BM25L, each full/brief), k=60
+        score_lists = (
+            _bm25f_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 0.0}),
+            _bm25f_scores(tf_pairs, query_terms, {'full': 0.0, 'brief': 1.4}),
+            _bm25l_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 0.0}),
+            _bm25l_scores(tf_pairs, query_terms, {'full': 0.0, 'brief': 1.4}),
+        )
         rrf = {i: 0.0 for i in range(n)}
-        for scores in (scores_full, scores_brief):
+        for scores in score_lists:
             for rank, i in enumerate(sorted(range(n), key=lambda j: scores[j], reverse=True)):
                 if scores[i] <= 0:
                     continue
@@ -1307,7 +1364,10 @@ def bm25_search(results, query, limit=0, brief=False, fusion=False):
             return rrf[i]
     else:
         # BM25F single pass: full 1.0 + brief 1.4
-        scores = _bm25f_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 1.4})
+        if bm25l:
+            scores = _bm25l_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 1.4})
+        else:
+            scores = _bm25f_scores(tf_pairs, query_terms, {'full': 1.0, 'brief': 1.4})
         ranked = sorted(range(n), key=lambda i: scores[i] + _PRIOR_SCALE * corpus[i][2], reverse=True)
         def _score_of(i):
             return scores[i] + _PRIOR_SCALE * corpus[i][2]
@@ -1424,6 +1484,8 @@ def main():
                    help="BM25 text search (instead of regex grep)")
     p.add_argument("--fusion", action="store_true",
                    help="RRF-fuse full and brief BM25F ranked lists (k=60)")
+    p.add_argument("--bm25l", action="store_true",
+                   help="use BM25L scoring instead of BM25F (no fusion)")
     a = p.parse_args()
     try:
         a.grep = re.compile(a.grep) if a.grep else None
@@ -1440,7 +1502,7 @@ def main():
     if a.grep:
         grep_search(all_results, a.grep, a.limit, a.brief)
     if a.search:
-        bm25_search(all_results, a.search, a.limit, a.brief, a.fusion)
+        bm25_search(all_results, a.search, a.limit, a.brief, a.fusion, a.bm25l)
 
 if __name__ == "__main__":
     if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
