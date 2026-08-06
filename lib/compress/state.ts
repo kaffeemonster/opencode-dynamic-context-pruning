@@ -1,5 +1,6 @@
 import type { CompressionBlock, PruneMessagesState, SessionState } from "../state"
 import { formatBlockRef, formatMessageIdTag } from "../message-ids"
+import { countTokens } from "../token-utils"
 import type { AppliedCompressionResult, CompressionStateInput, SelectionResolution } from "./types"
 
 export const COMPRESSED_BLOCK_HEADER = "[Compressed conversation section]"
@@ -42,6 +43,13 @@ export function attachCompressionDuration(
             continue
         }
 
+        // Replayed part.updated events on session load re-complete old compress
+        // calls. First attach (real completion) wins; replay must not overwrite.
+        // durationMs defaults to 0 at creation, so only > 0 counts as attached.
+        if (block.durationMs > 0) {
+            continue
+        }
+
         block.durationMs = durationMs
         updates++
     }
@@ -57,6 +65,39 @@ export function wrapCompressedSummary(blockId: number, summary: string): string 
         return `${header}\n${footer}`
     }
     return `${header}\n${body}\n\n${footer}`
+}
+
+function compactTokenCount(tokens: number): string {
+    if (!Number.isFinite(tokens) || tokens < 1000) {
+        return String(Math.max(0, Math.round(tokens)))
+    }
+    const scaled = (tokens / 1000).toFixed(1).replace(/\.0$/, "")
+    return `${scaled}K`
+}
+
+export function appendBlockMetaFooter(block: CompressionBlock): string {
+    const parts: string[] = []
+    const topic = block.topic?.trim()
+    if (topic) {
+        parts.push(`topic: ${topic.replace(/\s+/g, " ")}`)
+    }
+    if (block.includedBlockIds.length > 0) {
+        const refs = block.includedBlockIds.map((id) => `(b${id})`).join(" ")
+        parts.push(`contains: ${refs}`)
+    }
+    if (block.compressedTokens > 0) {
+        parts.push(`~${compactTokenCount(block.compressedTokens)} tokens`)
+    }
+    parts.push("recoverable via view tool /dcp-compress")
+
+    const footerLine = parts.join(" | ")
+    const tagIndex = block.summary.lastIndexOf(formatMessageIdTag(formatBlockRef(block.blockId)))
+    if (tagIndex === -1) {
+        return block.summary
+    }
+    const beforeTag = block.summary.slice(0, tagIndex).replace(/(?:\r?\n)+$/, "")
+    const tag = block.summary.slice(tagIndex)
+    return `${beforeTag}\n\n${footerLine}${tag}`
 }
 
 export function applyCompressionState(
@@ -254,6 +295,9 @@ export function applyCompressionState(
     block.directToolIds = [...newlyCompressedToolIds]
 
     block.compressedTokens = compressedTokens
+
+    block.summary = appendBlockMetaFooter(block)
+    block.summaryTokens = countTokens(block.summary)
 
     state.stats.pruneTokenCounter += compressedTokens
     state.stats.totalPruneTokens += state.stats.pruneTokenCounter

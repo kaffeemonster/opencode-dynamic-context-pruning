@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "fs"
 import { join, dirname } from "path"
+import { fileURLToPath } from "node:url"
 import { homedir } from "os"
 import { parse } from "jsonc-parser/lib/esm/main.js"
 import type { PluginInput } from "@opencode-ai/plugin"
@@ -27,6 +28,11 @@ export interface CompressConfig {
     protectedTools: string[]
     protectTags: boolean
     protectUserMessages: boolean
+    summaryStyle: "detailed" | "terse" | "wenyan"
+    preSweep: {
+        enabled: boolean
+        count: number
+    }
 }
 
 export interface Commands {
@@ -45,6 +51,14 @@ export interface PurgeErrors {
     protectedTools: string[]
 }
 
+export interface PurgeReasoning {
+    enabled: boolean
+    turns: number
+    highWater: number
+    lowWater: number
+    protectedTools: string[]
+}
+
 export interface TurnProtection {
     enabled: boolean
     turns: number
@@ -53,6 +67,18 @@ export interface TurnProtection {
 export interface ExperimentalConfig {
     allowSubAgents: boolean
     customPrompts: boolean
+}
+
+export interface ViewConfig {
+    enabled: boolean
+    pythonPath: string
+    scriptPath: string
+    exportDir: string
+    autoExport: boolean
+    tokenTruncation: number
+    userTokenLimit: number
+    postMode: "fullminview" | "notice" | "off"
+    rotateKeep: number
 }
 
 export interface PluginConfig {
@@ -70,7 +96,9 @@ export interface PluginConfig {
     strategies: {
         deduplication: Deduplication
         purgeErrors: PurgeErrors
+        purgeReasoning: PurgeReasoning
     }
+    view: ViewConfig
 }
 
 type CompressOverride = Partial<CompressConfig>
@@ -126,6 +154,10 @@ export const VALID_CONFIG_KEYS = new Set([
     "compress.protectedTools",
     "compress.protectTags",
     "compress.protectUserMessages",
+    "compress.preSweep",
+    "compress.preSweep.enabled",
+    "compress.preSweep.count",
+    "compress.summaryStyle",
     "strategies",
     "strategies.deduplication",
     "strategies.deduplication.enabled",
@@ -134,6 +166,22 @@ export const VALID_CONFIG_KEYS = new Set([
     "strategies.purgeErrors.enabled",
     "strategies.purgeErrors.turns",
     "strategies.purgeErrors.protectedTools",
+    "strategies.purgeReasoning",
+    "strategies.purgeReasoning.enabled",
+    "strategies.purgeReasoning.turns",
+    "strategies.purgeReasoning.highWater",
+    "strategies.purgeReasoning.lowWater",
+    "strategies.purgeReasoning.protectedTools",
+    "view",
+    "view.enabled",
+    "view.pythonPath",
+    "view.scriptPath",
+    "view.exportDir",
+    "view.autoExport",
+    "view.tokenTruncation",
+    "view.userTokenLimit",
+    "view.postMode",
+    "view.rotateKeep",
 ])
 
 function getConfigKeyPaths(obj: Record<string, any>, prefix = ""): string[] {
@@ -443,6 +491,40 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                 })
             }
 
+            if (compress.preSweep) {
+                if (
+                    compress.preSweep.enabled !== undefined &&
+                    typeof compress.preSweep.enabled !== "boolean"
+                ) {
+                    errors.push({
+                        key: "compress.preSweep.enabled",
+                        expected: "boolean",
+                        actual: typeof compress.preSweep.enabled,
+                    })
+                }
+                if (
+                    compress.preSweep.count !== undefined &&
+                    typeof compress.preSweep.count !== "number"
+                ) {
+                    errors.push({
+                        key: "compress.preSweep.count",
+                        expected: "number",
+                        actual: typeof compress.preSweep.count,
+                    })
+                }
+            }
+
+            if (compress.summaryStyle !== undefined) {
+                const validStyles = ["detailed", "terse", "wenyan"]
+                if (!validStyles.includes(compress.summaryStyle)) {
+                    errors.push({
+                        key: "compress.summaryStyle",
+                        expected: '"detailed" | "terse" | "wenyan"',
+                        actual: JSON.stringify(compress.summaryStyle),
+                    })
+                }
+            }
+
             if (
                 typeof compress.iterationNudgeThreshold === "number" &&
                 compress.iterationNudgeThreshold < 1
@@ -603,6 +685,124 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                 })
             }
         }
+
+        if (strategies.purgeReasoning) {
+            if (
+                strategies.purgeReasoning.enabled !== undefined &&
+                typeof strategies.purgeReasoning.enabled !== "boolean"
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.enabled",
+                    expected: "boolean",
+                    actual: typeof strategies.purgeReasoning.enabled,
+                })
+            }
+
+            if (
+                strategies.purgeReasoning.turns !== undefined &&
+                typeof strategies.purgeReasoning.turns !== "number"
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.turns",
+                    expected: "number",
+                    actual: typeof strategies.purgeReasoning.turns,
+                })
+            }
+            if (
+                typeof strategies.purgeReasoning.turns === "number" &&
+                strategies.purgeReasoning.turns < 1
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.turns",
+                    expected: "positive number (>= 1)",
+                    actual: `${strategies.purgeReasoning.turns} (will be clamped to 1)`,
+                })
+            }
+            if (
+                strategies.purgeReasoning.highWater !== undefined &&
+                typeof strategies.purgeReasoning.highWater !== "number"
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.highWater",
+                    expected: "number",
+                    actual: typeof strategies.purgeReasoning.highWater,
+                })
+            }
+            if (
+                strategies.purgeReasoning.lowWater !== undefined &&
+                typeof strategies.purgeReasoning.lowWater !== "number"
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.lowWater",
+                    expected: "number",
+                    actual: typeof strategies.purgeReasoning.lowWater,
+                })
+            }
+            if (
+                typeof strategies.purgeReasoning.highWater === "number" &&
+                typeof strategies.purgeReasoning.lowWater === "number" &&
+                strategies.purgeReasoning.lowWater >= strategies.purgeReasoning.highWater
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.lowWater",
+                    expected: "less than highWater",
+                    actual: `${strategies.purgeReasoning.lowWater} (will be clamped to highWater - 1)`,
+                })
+            }
+            if (
+                strategies.purgeReasoning.protectedTools !== undefined &&
+                !Array.isArray(strategies.purgeReasoning.protectedTools)
+            ) {
+                errors.push({
+                    key: "strategies.purgeReasoning.protectedTools",
+                    expected: "string[]",
+                    actual: typeof strategies.purgeReasoning.protectedTools,
+                })
+            }
+        }
+    }
+
+    const view = config.view
+    if (view !== undefined) {
+        if (typeof view !== "object" || view === null || Array.isArray(view)) {
+            errors.push({
+                key: "view",
+                expected: "object",
+                actual: typeof view,
+            })
+        } else {
+            if (view.enabled !== undefined && typeof view.enabled !== "boolean") {
+                errors.push({
+                    key: "view.enabled",
+                    expected: "boolean",
+                    actual: typeof view.enabled,
+                })
+            }
+            if (view.autoExport !== undefined && typeof view.autoExport !== "boolean") {
+                errors.push({
+                    key: "view.autoExport",
+                    expected: "boolean",
+                    actual: typeof view.autoExport,
+                })
+            }
+            if (view.postMode !== undefined) {
+                const validPostModes = ["fullminview", "notice", "off"]
+                if (!validPostModes.includes(view.postMode)) {
+                    errors.push({
+                        key: "view.postMode",
+                        expected: '"fullminview" | "notice" | "off"',
+                        actual: JSON.stringify(view.postMode),
+                    })
+                }
+            }
+            if (view.rotateKeep !== undefined && typeof view.rotateKeep !== "number") {
+                errors.push({
+                    key: "view.rotateKeep",
+                    expected: "number",
+                    actual: typeof view.rotateKeep,
+                })
+            }
+        }
     }
 
     return errors
@@ -653,6 +853,7 @@ function showConfigWarnings(
     }, 7000)
 }
 
+const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
 const defaultConfig: PluginConfig = {
     enabled: true,
     autoUpdate: true,
@@ -689,6 +890,11 @@ const defaultConfig: PluginConfig = {
         protectedTools: [...COMPRESS_DEFAULT_PROTECTED_TOOLS],
         protectTags: false,
         protectUserMessages: false,
+        summaryStyle: "detailed",
+        preSweep: {
+            enabled: false,
+            count: 100,
+        },
     },
     strategies: {
         deduplication: {
@@ -700,6 +906,24 @@ const defaultConfig: PluginConfig = {
             turns: 4,
             protectedTools: [],
         },
+        purgeReasoning: {
+            enabled: false,
+            turns: 8,
+            highWater: 30,
+            lowWater: 10,
+            protectedTools: [],
+        },
+    },
+    view: {
+        enabled: false,
+        pythonPath: "python",
+        scriptPath: join(PLUGIN_ROOT, "scripts", "VCC.py"),
+        exportDir: "",
+        autoExport: false,
+        tokenTruncation: 128,
+        userTokenLimit: 256,
+        postMode: "notice",
+        rotateKeep: 3,
     },
 }
 
@@ -829,6 +1053,18 @@ function mergeStrategies(
                 ]),
             ],
         },
+        purgeReasoning: {
+            enabled: override.purgeReasoning?.enabled ?? base.purgeReasoning.enabled,
+            turns: override.purgeReasoning?.turns ?? base.purgeReasoning.turns,
+            highWater: override.purgeReasoning?.highWater ?? base.purgeReasoning.highWater,
+            lowWater: override.purgeReasoning?.lowWater ?? base.purgeReasoning.lowWater,
+            protectedTools: [
+                ...new Set([
+                    ...base.purgeReasoning.protectedTools,
+                    ...(override.purgeReasoning?.protectedTools ?? []),
+                ]),
+            ],
+        },
     }
 }
 
@@ -855,6 +1091,11 @@ function mergeCompress(
         protectedTools: [...new Set([...base.protectedTools, ...(override.protectedTools ?? [])])],
         protectTags: override.protectTags ?? base.protectTags,
         protectUserMessages: override.protectUserMessages ?? base.protectUserMessages,
+        summaryStyle: override.summaryStyle ?? base.summaryStyle,
+        preSweep: {
+            enabled: override.preSweep?.enabled ?? base.preSweep.enabled,
+            count: override.preSweep?.count ?? base.preSweep.count,
+        },
     }
 }
 
@@ -896,6 +1137,21 @@ function mergeExperimental(
     }
 }
 
+function mergeView(base: PluginConfig["view"], override?: Partial<PluginConfig["view"]>): PluginConfig["view"] {
+    if (!override) return base
+    return {
+        enabled: override.enabled ?? base.enabled,
+        pythonPath: override.pythonPath ?? base.pythonPath,
+        scriptPath: override.scriptPath ?? base.scriptPath,
+        exportDir: override.exportDir ?? base.exportDir,
+        autoExport: override.autoExport ?? base.autoExport,
+        tokenTruncation: override.tokenTruncation ?? base.tokenTruncation,
+        userTokenLimit: override.userTokenLimit ?? base.userTokenLimit,
+        postMode: override.postMode ?? base.postMode,
+        rotateKeep: override.rotateKeep ?? base.rotateKeep,
+    }
+}
+
 function deepCloneConfig(config: PluginConfig): PluginConfig {
     return {
         ...config,
@@ -915,6 +1171,7 @@ function deepCloneConfig(config: PluginConfig): PluginConfig {
             modelMaxLimits: { ...config.compress.modelMaxLimits },
             modelMinLimits: { ...config.compress.modelMinLimits },
             protectedTools: [...config.compress.protectedTools],
+            preSweep: { ...config.compress.preSweep },
         },
         strategies: {
             deduplication: {
@@ -925,7 +1182,12 @@ function deepCloneConfig(config: PluginConfig): PluginConfig {
                 ...config.strategies.purgeErrors,
                 protectedTools: [...config.strategies.purgeErrors.protectedTools],
             },
+            purgeReasoning: {
+                ...config.strategies.purgeReasoning,
+                protectedTools: [...config.strategies.purgeReasoning.protectedTools],
+            },
         },
+        view: { ...config.view },
     }
 }
 
@@ -948,6 +1210,7 @@ function mergeLayer(config: PluginConfig, data: Record<string, any>): PluginConf
         ],
         compress: mergeCompress(config.compress, data.compress as CompressOverride),
         strategies: mergeStrategies(config.strategies, data.strategies as any),
+        view: mergeView(config.view, data.view as Partial<PluginConfig["view"]>),
     }
 }
 

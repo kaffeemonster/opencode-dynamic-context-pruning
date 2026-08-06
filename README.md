@@ -3,6 +3,13 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/dansmolsky)
 [![npm version](https://img.shields.io/npm/v/@tarquinen/opencode-dcp.svg)](https://www.npmjs.com/package/@tarquinen/opencode-dcp)
 
+> [!IMPORTANT]
+> **This is a community fork, not the original DCP.** Upstream development of [opencode-dcp](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning) has slowed — new context-management work moved to the [Sleev](https://sleev.ai) cloud service. This fork keeps DCP alive as a local, self-hosted plugin and adds features the original does not have.
+>
+> **Main new feature: [VCC](https://github.com/lllyasviel/VCC) integration.** Every compression is archived as a lossless, searchable transcript. Nothing that gets compacted is lost — the model can grep old context (including compressed blocks and reasoning) on demand via a `view` tool, and *never* has to unpack a block to recover it.
+>
+> **Other additions:** pre-compression sweep (`compress.preSweep`), caveman/wenyan compression styles (`compress.summaryStyle`), configurable reasoning pruning with hysteresis (`strategies.purgeReasoning`), block metainfo footer with token counts, and logrotate-style VCC view rotation (`view.rotateKeep`).
+
 Automatically reduces token usage in OpenCode by managing conversation context.
 
 ![DCP in action](assets/images/dcp-demo9.png)
@@ -162,6 +169,22 @@ Each level overrides the previous, so project settings take priority over global
         // Preserve your messages during compression.
         // Warning: large copy-pasted prompts will never be compressed away
         "protectUserMessages": false,
+        // Writing style for compression summaries:
+        // "detailed" = prose explanation
+        // "terse" = dense caveman-style (substance preserved, fluff stripped)
+        // "wenyan" = Classical Chinese 文言文, 80-90% character reduction
+        // (technical payload always verbatim regardless of style)
+        "summaryStyle": "detailed",
+        // Run a sweep/prune pass before model-triggered compression.
+        // Removes stale tool outputs so compression summaries focus on
+        // meaningful content instead of tool chatter.
+        "preSweep": {
+            // Prune tool outputs before every automatic compress execution
+            "enabled": false,
+            // Number of most recent tool calls to prune (0 = all tools
+            // since the previous user message)
+            "count": 100,
+        },
     },
     // Automatic pruning strategies
     "strategies": {
@@ -177,6 +200,27 @@ Each level overrides the previous, so project settings take priority over global
             // Number of turns before errored tool inputs are pruned
             "turns": 4,
             // Additional tools to protect from pruning
+            "protectedTools": [],
+        },
+        // Strip reasoning (thinking) parts from old assistant messages.
+        // Reasoning is scratch work - once the final result exists the
+        // verbose chains carry no information, but they count against the
+        // context budget. Uses hysteresis: reasoning accumulates until it
+        // exceeds "highWater" parts, then the oldest messages' reasoning is
+        // stripped down to "lowWater" parts. Batching pruning into bursts
+        // is cache-friendlier for providers that dislike mid-stream
+        // reasoning mutation.
+        // OFF by default - providers with caching semantics (e.g. Anthropic)
+        // may penalize reasoning pruning. Enable for long-running tasks.
+        "purgeReasoning": {
+            "enabled": false,
+            // Minimum turn age before a message's reasoning is eligible
+            "turns": 8,
+            // Prune once reasoning parts exceed this count
+            "highWater": 30,
+            // Prune down to this many reasoning parts
+            "lowWater": 10,
+            // Messages that called one of these tools keep their reasoning
             "protectedTools": [],
         },
     },
@@ -219,6 +263,47 @@ By default, these tools are always protected from pruning:
 The `protectedTools` arrays in `commands` and `strategies` add to this default list.
 
 For the `compress` tool, `compress.protectedTools` ensures specific tool outputs are appended to the compressed summary. By default it includes `task`, `skill`, `todowrite`, and `todoread`.
+
+### Conversation View (VCC)
+
+DCP can archive and search the session transcript using the [Conversation Compiler](https://github.com/lllyasviel/VCC) (VCC). The full transcript — including compressed blocks and reasoning — survives in a lossless `.txt` view, a brief `.min.txt` view, and a grep-able `.view.txt`.
+
+To enable, set `view.enabled: true` and point `view.scriptPath` at your `VCC.py`:
+
+```jsonc
+"view": {
+    "enabled": true,
+    "pythonPath": "python",
+    "scriptPath": "/path/to/VCC.py",
+    "exportDir": "",            // default: <data-dir>/plugin/dcp/vcc
+    "autoExport": false,        // re-export + compile after each compression
+    "tokenTruncation": 128,
+    "userTokenLimit": 256,
+    "postMode": "notice",       // "off" | "notice" | "fullminview"
+    "rotateKeep": 3,
+}
+```
+
+When enabled, the `view` tool is registered: the model can grep the archived transcript on demand (`view` with a regex `pattern`) and get line-range references into the full transcript — no decompression needed.
+
+Commands:
+- `/dcp view-export` — write the session snapshot to the VCC jsonl format.
+- `/dcp view-compile [pattern]` — export, compile with VCC, and (if `postMode` allows) post the result.
+
+### Compressed Block Meta Footer
+
+Every compressed block carries a metadata footer that the model sees in context:
+
+```
+topic: Auth System | contains: (b1) (b2) | ~45.6K tokens | recoverable via view tool /dcp-compress
+```
+
+- `topic` — the compression's short label.
+- `contains: (bN)` — directly-embedded sub-blocks (only present when a super-block was built from older blocks).
+- `~N tokens` — the size of the compressed content (what an unpack would restore).
+- `recoverable via view tool /dcp-compress` — explicit note that unpacking is never required; the content is reachable through the VCC view.
+
+Block numbers are monotonically increasing and never reused or renumbered, so the `(bN)` markers are stable for the life of a session.
 
 ## Impact on Prompt Caching
 

@@ -1,7 +1,11 @@
 import { tool } from "@opencode-ai/plugin"
 import type { ToolContext } from "./types"
 import { countTokens } from "../token-utils"
-import { MESSAGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
+import {
+    MESSAGE_FORMAT_EXTENSION,
+    TERSE_STYLE_EXTENSION,
+    WENYAN_STYLE_EXTENSION,
+} from "../prompts/extensions/tool"
 import { formatIssues, formatResult, resolveMessages, validateArgs } from "./message-utils"
 import { finalizeSession, prepareSession, type NotificationEntry } from "./pipeline"
 import { appendProtectedPromptInfo, appendProtectedTools } from "./protected-content"
@@ -43,7 +47,11 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
     const runtimePrompts = ctx.prompts.getRuntimePrompts()
 
     return tool({
-        description: runtimePrompts.compressMessage + MESSAGE_FORMAT_EXTENSION,
+        description:
+            runtimePrompts.compressMessage +
+            MESSAGE_FORMAT_EXTENSION +
+            (ctx.config.compress.summaryStyle === "terse" ? TERSE_STYLE_EXTENSION : "") +
+            (ctx.config.compress.summaryStyle === "wenyan" ? WENYAN_STYLE_EXTENSION : ""),
         args: buildSchema(),
         async execute(args, toolCtx) {
             const input = args as CompressMessageToolArgs

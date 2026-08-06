@@ -246,6 +246,33 @@
                     "type": "boolean",
                     "default": false,
                     "description": "When enabled, your messages are never lost during compression"
+                },
+                "summaryStyle": {
+                    "type": "string",
+                    "enum": ["detailed", "terse", "wenyan"],
+                    "default": "detailed",
+                    "description": "Writing style for compression summaries. 'detailed' keeps prose explanation; 'terse' writes dense telegraphic/caveman-style summaries; 'wenyan' writes Classical Chinese (文言文) summaries with 80-90% character reduction. All styles preserve full technical substance."
+                },
+                "preSweep": {
+                    "type": "object",
+                    "description": "Run a sweep/prune pass before model-triggered compression",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Prune stale tool outputs before every automatic compress execution"
+                        },
+                        "count": {
+                            "type": "number",
+                            "default": 100,
+                            "description": "Number of most recent tool calls to prune before compressing (0 sweeps all tools since the previous user message)"
+                        }
+                    },
+                    "default": {
+                        "enabled": false,
+                        "count": 100
+                    }
                 }
             },
             "default": {
@@ -260,7 +287,12 @@
                 "nudgeForce": "soft",
                 "protectedTools": [],
                 "protectTags": false,
-                "protectUserMessages": false
+                "protectUserMessages": false,
+                "summaryStyle": "detailed",
+                "preSweep": {
+                    "enabled": false,
+                    "count": 100
+                }
             }
         },
         "strategies": {
@@ -312,6 +344,94 @@
                             "description": "Tool names or wildcard patterns excluded from error purging. Supports glob wildcards: * matches any characters, ? matches a single character (e.g., \"mcp_*\", \"my_tool_?\")"
                         }
                     }
+                },
+                "purgeReasoning": {
+                    "type": "object",
+                    "description": "Strip reasoning (thinking) parts from old assistant messages using hysteresis. Reasoning is scratch work - after the final result is produced the verbose chains carry no information, but they are counted against the context budget. Reasoning accumulates freely until it exceeds 'highWater' parts, then the oldest messages' reasoning is stripped down to 'lowWater' parts. Batching pruning into bursts is cache-friendlier for providers that dislike mid-stream reasoning mutation. Runs in the request transform on every turn, independent of compression. OFF by default - providers with caching semantics may penalize reasoning pruning.",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Enable reasoning purge strategy"
+                        },
+                        "turns": {
+                            "type": "number",
+                            "default": 8,
+                            "description": "Minimum turn age before a message's reasoning is eligible for stripping"
+                        },
+                        "highWater": {
+                            "type": "number",
+                            "default": 30,
+                            "description": "Prune once total reasoning parts in the request exceed this count"
+                        },
+                        "lowWater": {
+                            "type": "number",
+                            "default": 10,
+                            "description": "Prune down to this many reasoning parts (must be less than highWater)"
+                        },
+                        "protectedTools": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "default": [],
+                            "description": "Tool names or wildcard patterns. Messages that called one of these tools keep their reasoning. Supports glob wildcards"
+                        }
+                    }
+                }
+            }
+        },
+        "view": {
+            "type": "object",
+            "description": "VCC (View-oriented Conversation Compiler) integration",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable VCC view integration"
+                },
+                "pythonPath": {
+                    "type": "string",
+                    "default": "python",
+                    "description": "Python interpreter used to run VCC.py"
+                },
+                "scriptPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Absolute path to VCC.py script"
+                },
+                "exportDir": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Output directory for VCC exports (defaults to dcp storage vcc/ subdirectory)"
+                },
+                "autoExport": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically export + compile VCC views when a compression completes"
+                },
+                "tokenTruncation": {
+                    "type": "number",
+                    "default": 128,
+                    "description": "Token truncation limit for assistant content in brief view"
+                },
+                "userTokenLimit": {
+                    "type": "number",
+                    "default": 256,
+                    "description": "Token truncation limit for user content in brief view"
+                },
+                "postMode": {
+                    "type": "string",
+                    "enum": ["fullminview", "notice", "off"],
+                    "default": "notice",
+                    "description": "What to post to chat after auto compile: 'fullminview' posts the brief view, 'notice' posts a short pointer to the view files, 'off' compiles silently"
+                },
+                "rotateKeep": {
+                    "type": "number",
+                    "default": 3,
+                    "description": "Number of previous view files to keep as gzipped archives (.txt.1.gz, .txt.2.gz, ...). Old archives beyond this count are removed. Set to 0 to disable rotation."
                 }
             }
         }

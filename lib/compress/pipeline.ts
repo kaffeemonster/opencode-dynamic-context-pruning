@@ -4,6 +4,7 @@ import { saveSessionState } from "../state/persistence"
 import { assignMessageRefs } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
 import { deduplicate, purgeErrors } from "../strategies"
+import { performSweep } from "../commands/sweep"
 import { getCurrentParams, getCurrentTokenUsage } from "../token-utils"
 import { sendCompressNotification } from "../ui/notification"
 import type { ToolContext } from "./types"
@@ -71,6 +72,27 @@ export async function prepareSession(
 
     deduplicate(ctx.state, ctx.logger, ctx.config, rawMessages)
     purgeErrors(ctx.state, ctx.logger, ctx.config, rawMessages)
+
+    // Auto sweep before compress: prune stale tool outputs so compression
+    // summaries focus on meaningful content rather than tool chatter.
+    const preSweep = ctx.config.compress.preSweep
+    if (preSweep?.enabled) {
+        const count = preSweep.count > 0 ? preSweep.count : undefined
+        const result = performSweep(ctx.state, ctx.config, ctx.logger, rawMessages, count)
+
+        if (result.toolIds.length > 0) {
+            ctx.logger.info("Pre-sweep before compress", {
+                toolsSwept: result.toolIds.length,
+                tokensSaved: result.tokensSaved,
+                mode: result.mode,
+                skippedProtected: result.skippedProtected,
+            })
+        } else {
+            ctx.logger.debug("Pre-sweep before compress: nothing to sweep", {
+                skippedProtected: result.skippedProtected,
+            })
+        }
+    }
 
     return {
         rawMessages,

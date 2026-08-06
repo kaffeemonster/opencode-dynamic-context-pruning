@@ -1,6 +1,13 @@
+import { join } from "path"
+import { execFile } from "child_process"
+import * as fs from "fs/promises"
+import { existsSync, mkdirSync } from "fs"
 import type { SessionState, WithParts } from "./state"
 import type { Logger } from "./logger"
 import type { PluginConfig } from "./config"
+import { STORAGE_DIR } from "./state/persistence"
+import { rotateViewFiles } from "./vcc/rotate"
+import { partsToVccContent } from "./vcc/parts"
 import { assignMessageRefs } from "./message-ids"
 import {
     buildPriorityMap,
@@ -36,7 +43,13 @@ import {
 } from "./commands"
 import { type HostPermissionSnapshot } from "./host-permissions"
 import { compressPermission, syncCompressPermissionState } from "./compress-permission"
-import { checkSession, ensureSessionInitialized, saveSessionState, syncToolCache } from "./state"
+import {
+    checkSession,
+    deleteSessionState,
+    ensureSessionInitialized,
+    saveSessionState,
+    syncToolCache,
+} from "./state"
 import { cacheSystemPromptTokens } from "./ui/utils"
 
 const INTERNAL_AGENT_SIGNATURES = [
@@ -275,6 +288,16 @@ export function createCommandExecuteHandler(
                 return
             }
 
+            if (subcommand === "view-export") {
+                await handleViewExportCommand(commandCtx)
+                return
+            }
+
+            if (subcommand === "view-compile") {
+                await handleViewCompileCommand(commandCtx, subArgs)
+                return
+            }
+
             await handleHelpCommand(commandCtx)
             return
         }
@@ -290,8 +313,15 @@ export function createTextCompleteHandler() {
     }
 }
 
-export function createEventHandler(state: SessionState, logger: Logger) {
+export function createEventHandler(
+    state: SessionState,
+    logger: Logger,
+    config?: PluginConfig,
+    client?: any,
+) {
     return async (input: { event: any }) => {
+        const cfg = config ?? { view: { enabled: false } } as PluginConfig
+        const clientRef = client ?? {} as any
         const eventTime =
             typeof input.event?.time === "number" && Number.isFinite(input.event.time)
                 ? input.event.time
@@ -299,6 +329,37 @@ export function createEventHandler(state: SessionState, logger: Logger) {
                     Number.isFinite(input.event.properties.time)
                   ? input.event.properties.time
                   : undefined
+
+        if (input.event.type === "session.deleted") {
+            const sessionId = input.event.properties?.sessionID || input.event.properties?.id
+            if (typeof sessionId !== "string" || !sessionId) {
+                return
+            }
+
+            const deleted = await deleteSessionState(sessionId)
+
+            // Clean up VCC exports for the deleted session
+            let removedViews = 0
+            const vccDir = join(STORAGE_DIR, "vcc")
+            if (existsSync(vccDir)) {
+                const files = await fs.readdir(vccDir)
+                for (const f of files) {
+                    if (f.startsWith(`${sessionId}_export`)) {
+                        try {
+                            await fs.unlink(join(vccDir, f))
+                            removedViews++
+                        } catch {}
+                    }
+                }
+            }
+
+            logger.info("Handled session deletion", {
+                sessionId,
+                stateFileDeleted: deleted,
+                vccFilesRemoved: removedViews,
+            })
+            return
+        }
 
         if (input.event.type !== "message.part.updated") {
             return
@@ -359,6 +420,13 @@ export function createEventHandler(state: SessionState, logger: Logger) {
                 blocks: updates,
                 durationMs,
             })
+
+            // Auto-export + compile on compression completion
+            if (cfg.view?.enabled && cfg.view.autoExport) {
+                runAutoVccPipeline(state, cfg, clientRef, logger).catch((err) => {
+                    logger.warn("Auto VCC pipeline failed", { error: err?.message })
+                })
+            }
             return
         }
 
@@ -372,4 +440,269 @@ export function createEventHandler(state: SessionState, logger: Logger) {
             )
         }
     }
+}
+
+async function exportSessionForVcc(
+    state: SessionState,
+    messages: WithParts[],
+    logger: Logger,
+    exportDirOverride?: string,
+): Promise<string> {
+    const EXPORT_DIR = exportDirOverride || join(STORAGE_DIR, "vcc")
+    if (!existsSync(EXPORT_DIR)) {
+        mkdirSync(EXPORT_DIR, { recursive: true })
+    }
+
+    if (!state.sessionId) {
+        throw new Error("No active session")
+    }
+
+    const exportPath = join(EXPORT_DIR, `${state.sessionId}_export.jsonl`)
+
+    interface VccRecord {
+        type: string
+        timestamp?: string
+        message?: {
+            content?: any
+            usage?: Record<string, number>
+            model?: string
+        }
+        content?: string
+        blockId?: number
+        summary?: string
+        metadata?: Record<string, any>
+    }
+
+    const records: VccRecord[] = []
+
+    records.push({
+        type: "system",
+        timestamp: new Date().toISOString(),
+        message: {
+            content: [{ type: "text", text: `View export for session ${state.sessionId}` }],
+        },
+    })
+
+    const blockRefs: Record<string, any> = {}
+
+    for (const block of state.prune.messages.blocksById.values()) {
+        const blockKey = `[block:${block.blockId}]`
+        blockRefs[blockKey] = block
+        records.push({
+            type: "system",
+            timestamp: new Date(block.createdAt).toISOString(),
+            message: {
+                content: [{
+                    type: "text",
+                    text: `[compressed block ${block.blockId}] topic: ${block.topic}\nsummary: ${block.summary}`,
+                }],
+            },
+        })
+    }
+
+    for (const msg of messages) {
+        const content = partsToVccContent(
+            msg.parts as unknown as Array<{ type: string } & Record<string, any>>,
+        )
+
+        const tokenCount = state.prune.messages.byMessageId.get(msg.info.id)?.tokenCount || 0
+
+        records.push({
+            type: msg.info.role === "user" ? "user" : msg.info.role === "assistant" ? "assistant" : "system",
+            timestamp: typeof msg.info.time === "number" ? new Date(msg.info.time).toISOString() : new Date().toISOString(),
+            message: {
+                content: content.length ? content : [],
+            },
+            metadata: {
+                messageId: msg.info.id,
+                tokenCount,
+                role: msg.info.role || "assistant",
+            },
+        })
+    }
+
+    const jsonlContent = records.map((r) => JSON.stringify(r)).join("\n") + "\n"
+    await fs.writeFile(exportPath, jsonlContent, "utf-8")
+
+    logger.info("Exported session for VCC", {
+        sessionId: state.sessionId,
+        outputPath: exportPath,
+        records: records.length,
+    })
+
+    return exportPath
+}
+
+async function handleViewExportCommand(cmdCtx: {
+    client: any
+    state: SessionState
+    config: PluginConfig
+    logger: Logger
+    sessionId: string
+    messages: WithParts[]
+}): Promise<void> {
+    const exportPath = await exportSessionForVcc(cmdCtx.state, cmdCtx.messages, cmdCtx.logger, cmdCtx.config.view?.exportDir)
+
+    await cmdCtx.client.session.prompt({
+        path: { id: cmdCtx.sessionId },
+        body: {
+            noReply: true,
+            parts: [{ type: "text", text: `VCC export written to:\n\n${exportPath}\n\nRun:\npython <path-to-VCC.py> "${exportPath}"` }],
+        },
+    })
+}
+
+async function handleViewCompileCommand(cmdCtx: {
+    client: any
+    state: SessionState
+    config: PluginConfig
+    logger: Logger
+    sessionId: string
+    messages: WithParts[]
+}, args: string[]): Promise<void> {
+    const viewConfig = cmdCtx.config.view
+    if (!viewConfig.enabled) {
+        sendResponse(cmdCtx.client, cmdCtx.sessionId, "View feature disabled. Set view.enabled=true in dcp.jsonc")
+        return
+    }
+
+    const scriptPath = viewConfig.scriptPath
+    if (!scriptPath) {
+        sendResponse(cmdCtx.client, cmdCtx.sessionId, "VCC script path not configured. Set view.scriptPath in dcp.jsonc")
+        return
+    }
+
+    const grepPattern = args.length > 0 ? args.join(" ") : undefined
+
+    const exportPath = await exportSessionForVcc(cmdCtx.state, cmdCtx.messages, cmdCtx.logger, cmdCtx.config.view?.exportDir)
+
+    runVccCompile(
+        viewConfig.pythonPath || "python",
+        scriptPath,
+        exportPath,
+        grepPattern,
+        viewConfig.rotateKeep,
+    ).then((output) => {
+        sendResponse(cmdCtx.client, cmdCtx.sessionId, String(output))
+    }).catch((err) => {
+        sendResponse(cmdCtx.client, cmdCtx.sessionId, `Error: ${String(err.message || err)}`)
+    })
+}
+
+function sendResponse(client: any, sessionId: string, text: string): void {
+    client.session.prompt({
+        path: { id: sessionId },
+        body: {
+            noReply: true,
+            parts: [{ type: "text", text }],
+        },
+    }).catch(() => {})
+}
+
+async function runVccCompile(
+    pythonPath: string,
+    scriptPath: string,
+    exportPath: string,
+    grepPattern?: string,
+    rotateKeep?: number,
+): Promise<string> {
+    // Rotate previous view files before VCC overwrites them
+    await rotateViewFiles(exportPath, rotateKeep ?? 3)
+
+    const args = [scriptPath, exportPath]
+    if (grepPattern) {
+        args.push("--grep", grepPattern)
+    }
+
+    return new Promise((resolve, reject) => {
+        execFile(pythonPath, args, (error, stdout, stderr) => {
+            if (error) {
+                reject(new Error(`VCC failed: ${error.message}${stderr ? "\n" + stderr : ""}`))
+            } else {
+                resolve(stdout || "")
+            }
+        })
+    })
+}
+
+async function runAutoVccPipeline(
+    state: SessionState,
+    config: PluginConfig,
+    client: any,
+    logger: Logger,
+): Promise<void> {
+    const viewConfig = config.view
+    if (!viewConfig.enabled || !viewConfig.autoExport) {
+        return
+    }
+
+    const sessionId = state.sessionId
+    if (!sessionId) {
+        return
+    }
+
+    const scriptPath = viewConfig.scriptPath
+    if (!scriptPath) {
+        logger.warn("view.scriptPath not configured; skipping auto VCC compile")
+        return
+    }
+
+    // Fetch current session messages
+    const messagesResponse = await client.session.messages({ path: { id: sessionId } })
+    const messages = filterMessages(messagesResponse.data || messagesResponse)
+
+    // Export session snapshot to VCC format
+    const exportPath = await exportSessionForVcc(state, messages, logger, viewConfig.exportDir)
+
+    // Compile with VCC
+    const output = await runVccCompile(
+        viewConfig.pythonPath || "python",
+        scriptPath,
+        exportPath,
+        undefined,
+        viewConfig.rotateKeep,
+    )
+
+    // Read the .min.txt brief view
+    const minPath = exportPath.replace(/\.jsonl$/, ".min.txt")
+    const fullPath = minPath.replace(/\.min\.txt$/, ".txt")
+
+    if (viewConfig.postMode === "off") {
+        return
+    }
+
+    if (viewConfig.postMode === "notice") {
+        sendResponse(
+            client,
+            sessionId,
+            [
+                `**VCC views updated** (session ${sessionId})`,
+                ``,
+                `Brief view (structure + tool call line refs): \`${minPath}\``,
+                `Full view (lossless transcript): \`${fullPath}\``,
+                ``,
+                `You can search past context by running \`/dcp view-compile <pattern>\`, or using the \`view\` tool with a \`pattern\`.`,
+            ].join("\n"),
+        )
+        return
+    }
+
+    // postMode === "fullminview": read and post the brief view
+    let briefContent = ""
+    try {
+        briefContent = await fs.readFile(minPath, "utf-8")
+    } catch {
+        logger.warn("Could not read VCC .min.txt output", { minPath })
+    }
+
+    const resultText = [
+        `**VCC view updated** (session ${sessionId})`,
+        ``,
+        briefContent || output,
+        ``,
+        `Full view: ${fullPath}`,
+        `Brief view: ${minPath}`,
+    ].join("\n")
+
+    sendResponse(client, sessionId, resultText)
 }

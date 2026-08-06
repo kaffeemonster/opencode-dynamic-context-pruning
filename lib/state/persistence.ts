@@ -42,7 +42,7 @@ export interface PersistedSessionState {
     lastUpdated: string
 }
 
-const STORAGE_DIR = join(
+export const STORAGE_DIR = join(
     process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
     "opencode",
     "storage",
@@ -250,6 +250,19 @@ export async function saveManualModeSetting(
     state.manualMode = manualMode
     state.lastUpdated = new Date().toISOString()
     await writePersistedSessionState(sessionId, state, logger)
+}
+
+export async function deleteSessionState(sessionId: string): Promise<boolean> {
+    try {
+        const filePath = getSessionFilePath(sessionId)
+        if (!existsSync(filePath)) {
+            return false
+        }
+        await fs.unlink(filePath)
+        return true
+    } catch {
+        return false
+    }
 }
 
 export interface AggregatedStats {

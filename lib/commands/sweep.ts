@@ -35,7 +35,14 @@ export interface SweepCommandContext {
     workingDirectory: string
 }
 
-function findLastUserMessageIndex(messages: WithParts[]): number {
+export interface SweepResult {
+    toolIds: string[]
+    tokensSaved: number
+    mode: "since-user" | "last-n"
+    skippedProtected: number
+}
+
+export function findLastUserMessageIndex(messages: WithParts[]): number {
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]
         if (msg.info.role === "user" && !isIgnoredUserMessage(msg)) {
@@ -46,7 +53,7 @@ function findLastUserMessageIndex(messages: WithParts[]): number {
     return -1
 }
 
-function collectToolIdsAfterIndex(
+export function collectToolIdsAfterIndex(
     state: SessionState,
     messages: WithParts[],
     afterIndex: number,
@@ -69,6 +76,100 @@ function collectToolIdsAfterIndex(
     }
 
     return toolIds
+}
+
+/**
+ * Core sweep logic shared by the /dcp sweep command and the pre-compress
+ * preSweep pass. Prunes tool outputs and records them in state.prune.tools.
+ *
+ * @param count When provided and > 0, sweep the last N tools. Otherwise sweep
+ *              all tools since the previous user message.
+ */
+export function performSweep(
+    state: SessionState,
+    config: PluginConfig,
+    logger: Logger,
+    messages: WithParts[],
+    count?: number,
+): SweepResult {
+    const protectedTools = config.commands.protectedTools
+
+    syncToolCache(state, config, logger, messages)
+    buildToolIdList(state, messages)
+
+    const numArg = count && !isNaN(count) && count > 0 ? count : null
+    const isLastNMode = numArg !== null
+
+    let toolIdsToSweep: string[]
+    let mode: "since-user" | "last-n"
+
+    if (isLastNMode) {
+        mode = "last-n"
+        const startIndex = Math.max(0, state.toolIdList.length - numArg!)
+        toolIdsToSweep = state.toolIdList.slice(startIndex)
+    } else {
+        mode = "since-user"
+        const lastUserMsgIndex = findLastUserMessageIndex(messages)
+
+        if (lastUserMsgIndex === -1) {
+            return { toolIds: [], tokensSaved: 0, mode, skippedProtected: 0 }
+        }
+        toolIdsToSweep = collectToolIdsAfterIndex(state, messages, lastUserMsgIndex)
+    }
+
+    // Filter out already-pruned tools, protected tools, and protected file paths
+    const newToolIds = toolIdsToSweep.filter((id) => {
+        if (state.prune.tools.has(id)) {
+            return false
+        }
+        const entry = state.toolParameters.get(id)
+        if (!entry) {
+            return true
+        }
+        if (isToolNameProtected(entry.tool, protectedTools)) {
+            logger.debug(`Sweep: skipping protected tool ${entry.tool} (${id})`)
+            return false
+        }
+        const filePaths = getFilePathsFromParameters(entry.tool, entry.parameters)
+        if (isFilePathProtected(filePaths, config.protectedFilePatterns)) {
+            logger.debug(`Sweep: skipping protected file path(s) ${filePaths.join(", ")} (${id})`)
+            return false
+        }
+        return true
+    })
+
+    // Count how many were skipped due to protection
+    const skippedProtected = toolIdsToSweep.filter((id) => {
+        const entry = state.toolParameters.get(id)
+        if (!entry) {
+            return false
+        }
+        if (isToolNameProtected(entry.tool, protectedTools)) {
+            return true
+        }
+        const filePaths = getFilePathsFromParameters(entry.tool, entry.parameters)
+        if (isFilePathProtected(filePaths, config.protectedFilePatterns)) {
+            return true
+        }
+        return false
+    }).length
+
+    if (newToolIds.length > 0) {
+        const tokensSaved = getTotalToolTokens(state, newToolIds)
+
+        // Add to prune list
+        for (const id of newToolIds) {
+            const entry = state.toolParameters.get(id)
+            state.prune.tools.set(id, entry?.tokenCount ?? 0)
+        }
+        state.stats.pruneTokenCounter += tokensSaved
+        state.stats.totalPruneTokens += state.stats.pruneTokenCounter
+        state.stats.pruneTokenCounter = 0
+
+        return { toolIds: newToolIds, tokensSaved, mode, skippedProtected }
+    }
+
+    return { toolIds: [], tokensSaved: 0, mode, skippedProtected }
 }
 
 function formatNoUserMessage(): string {
@@ -130,109 +231,46 @@ export async function handleSweepCommand(ctx: SweepCommandContext): Promise<void
     const { client, state, config, logger, sessionId, messages, args, workingDirectory } = ctx
 
     const params = getCurrentParams(state, messages, logger)
-    const protectedTools = config.commands.protectedTools
-
-    syncToolCache(state, config, logger, messages)
-    buildToolIdList(state, messages)
 
     // Parse optional numeric argument
     const numArg = args[0] ? parseInt(args[0], 10) : null
     const isLastNMode = numArg !== null && !isNaN(numArg) && numArg > 0
 
-    let toolIdsToSweep: string[]
-    let mode: "since-user" | "last-n"
-
     if (isLastNMode) {
-        // Mode: Sweep last N tools
-        mode = "last-n"
-        const startIndex = Math.max(0, state.toolIdList.length - numArg!)
-        toolIdsToSweep = state.toolIdList.slice(startIndex)
-        logger.info(`Sweep command: last ${numArg} mode, found ${toolIdsToSweep.length} tools`)
+        logger.info(`Sweep command: last ${numArg} mode`)
     } else {
-        // Mode: Sweep since last user message
-        mode = "since-user"
         const lastUserMsgIndex = findLastUserMessageIndex(messages)
-
         if (lastUserMsgIndex === -1) {
-            // No user message found - show message and return
             const message = formatNoUserMessage()
             await sendIgnoredMessage(client, sessionId, message, params, logger)
             logger.info("Sweep command: no user message found")
             return
-        } else {
-            toolIdsToSweep = collectToolIdsAfterIndex(state, messages, lastUserMsgIndex)
-            logger.info(
-                `Sweep command: found last user at index ${lastUserMsgIndex}, sweeping ${toolIdsToSweep.length} tools`,
-            )
         }
+        logger.info(`Sweep command: found last user at index ${lastUserMsgIndex}`)
     }
 
-    // Filter out already-pruned tools, protected tools, and protected file paths
-    const newToolIds = toolIdsToSweep.filter((id) => {
-        if (state.prune.tools.has(id)) {
-            return false
-        }
-        const entry = state.toolParameters.get(id)
-        if (!entry) {
-            return true
-        }
-        if (isToolNameProtected(entry.tool, protectedTools)) {
-            logger.debug(`Sweep: skipping protected tool ${entry.tool} (${id})`)
-            return false
-        }
-        const filePaths = getFilePathsFromParameters(entry.tool, entry.parameters)
-        if (isFilePathProtected(filePaths, config.protectedFilePatterns)) {
-            logger.debug(`Sweep: skipping protected file path(s) ${filePaths.join(", ")} (${id})`)
-            return false
-        }
-        return true
-    })
+    const result = performSweep(state, config, logger, messages, isLastNMode ? numArg! : undefined)
 
-    // Count how many were skipped due to protection
-    const skippedProtected = toolIdsToSweep.filter((id) => {
-        const entry = state.toolParameters.get(id)
-        if (!entry) {
-            return false
-        }
-        if (isToolNameProtected(entry.tool, protectedTools)) {
-            return true
-        }
-        const filePaths = getFilePathsFromParameters(entry.tool, entry.parameters)
-        if (isFilePathProtected(filePaths, config.protectedFilePatterns)) {
-            return true
-        }
-        return false
-    }).length
-
-    if (newToolIds.length === 0) {
+    if (result.toolIds.length === 0) {
         const message = formatSweepMessage(
             0,
             0,
-            mode,
+            result.mode,
             [],
             new Map(),
             workingDirectory,
-            skippedProtected,
+            result.skippedProtected,
         )
         await sendIgnoredMessage(client, sessionId, message, params, logger)
-        logger.info("Sweep command: no new tools to sweep", { skippedProtected })
+        logger.info("Sweep command: no new tools to sweep", {
+            skippedProtected: result.skippedProtected,
+        })
         return
     }
 
-    const tokensSaved = getTotalToolTokens(state, newToolIds)
-
-    // Add to prune list
-    for (const id of newToolIds) {
-        const entry = state.toolParameters.get(id)
-        state.prune.tools.set(id, entry?.tokenCount ?? 0)
-    }
-    state.stats.pruneTokenCounter += tokensSaved
-    state.stats.totalPruneTokens += state.stats.pruneTokenCounter
-    state.stats.pruneTokenCounter = 0
-
     // Collect metadata for logging
     const toolMetadata: Map<string, ToolParameterEntry> = new Map()
-    for (const id of newToolIds) {
+    for (const id of result.toolIds) {
         const entry = state.toolParameters.get(id)
         if (entry) {
             toolMetadata.set(id, entry)
@@ -245,21 +283,21 @@ export async function handleSweepCommand(ctx: SweepCommandContext): Promise<void
     )
 
     const message = formatSweepMessage(
-        newToolIds.length,
-        tokensSaved,
-        mode,
-        newToolIds,
+        result.toolIds.length,
+        result.tokensSaved,
+        result.mode,
+        result.toolIds,
         toolMetadata,
         workingDirectory,
-        skippedProtected,
+        result.skippedProtected,
     )
     await sendIgnoredMessage(client, sessionId, message, params, logger)
 
     logger.info("Sweep command completed", {
-        toolsSwept: newToolIds.length,
-        tokensSaved,
-        skippedProtected,
-        mode,
+        toolsSwept: result.toolIds.length,
+        tokensSaved: result.tokensSaved,
+        skippedProtected: result.skippedProtected,
+        mode: result.mode,
         tools: Array.from(toolMetadata.entries()).map(([id, entry]) => ({
             id,
             tool: entry.tool,

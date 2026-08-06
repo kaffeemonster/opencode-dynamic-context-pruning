@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { getConfig } from "./lib/config"
 import { createCompressMessageTool, createCompressRangeTool } from "./lib/compress"
+import { createViewTool } from "./lib/vcc/view-tool"
 import {
     compressDisabledByOpencode,
     hasExplicitToolPermission,
@@ -77,13 +78,16 @@ const server: Plugin = (async (ctx) => {
             ctx.directory,
             hostPermissions,
         ),
-        event: createEventHandler(state, logger),
+        event: createEventHandler(state, logger, config, ctx.client),
         tool: {
             ...(config.compress.permission !== "deny" && {
                 compress:
                     config.compress.mode === "message"
                         ? createCompressMessageTool(compressToolContext)
                         : createCompressRangeTool(compressToolContext),
+            }),
+            ...(config.view.enabled && {
+                view: createViewTool(compressToolContext),
             }),
         },
         config: async (opencodeConfig) => {
@@ -106,6 +110,9 @@ const server: Plugin = (async (ctx) => {
             if (config.compress.permission !== "deny" && !config.experimental.allowSubAgents) {
                 toolsToAdd.push("compress")
             }
+            if (config.view.enabled && !config.experimental.allowSubAgents) {
+                toolsToAdd.push("view")
+            }
 
             if (toolsToAdd.length > 0) {
                 const existingPrimaryTools = opencodeConfig.experimental?.primary_tools ?? []
@@ -120,6 +127,14 @@ const server: Plugin = (async (ctx) => {
                 opencodeConfig.permission = {
                     ...permission,
                     compress: config.compress.permission,
+                } as typeof permission
+            }
+
+            if (config.view.enabled && !hasExplicitToolPermission(opencodeConfig.permission, "view")) {
+                const permission = opencodeConfig.permission ?? {}
+                opencodeConfig.permission = {
+                    ...permission,
+                    view: "allow",
                 } as typeof permission
             }
 
