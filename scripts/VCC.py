@@ -974,7 +974,7 @@ def _rel_path(fp):
     except ValueError:
         return os.path.abspath(fp)
 
-def grep_search(results, pattern, limit=0, brief=False, order="newest"):
+def grep_search(results, pattern, limit=0, brief=False, order="newest", offset=0):
     first = True
     count = 0
     oldest = order == "oldest"
@@ -992,6 +992,8 @@ def grep_search(results, pattern, limit=0, brief=False, order="newest"):
             if len(lines) <= 1:
                 continue
             count += 1
+            if offset and count <= offset:
+                continue
             if not first: print()
             first = False
             ts = section_ts.get(o.get("_sec"))
@@ -999,7 +1001,7 @@ def grep_search(results, pattern, limit=0, brief=False, order="newest"):
             print(f"{lines[0]} [{o['type']}]{ts_suffix}")
             for lt in lines[1:]:
                 print(lt)
-            if limit and count >= limit:
+            if limit and count - offset >= limit:
                 return
 
 
@@ -1285,7 +1287,7 @@ def _node_prior(o, cur_tool, content_lines):
         return 12
     return 0
 
-def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False):
+def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False, offset=0):
     query_terms = _analyze(query)
     if not query_terms:
         print("No searchable terms in query.")
@@ -1379,6 +1381,9 @@ def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False)
         sc = _score_of(i)
         if sc <= 0:
             continue
+        count += 1
+        if offset and count <= offset:
+            continue
         filepath, o, prior, ts = corpus[i]
         short = _rel_path(filepath)
         ts_suffix = f" event={ts}" if ts else ""
@@ -1390,8 +1395,7 @@ def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False)
         src = o.get("content_brief") if brief else o.get("content")
         for line in (src or [])[:8]:
             print(f"   {line}")
-        count += 1
-        if limit and count >= limit:
+        if limit and count - offset >= limit:
             return
 
 
@@ -1483,6 +1487,8 @@ def main():
                    help="Search brief (min) view content instead of full content")
     p.add_argument("--order", choices=["newest", "oldest"], default="newest",
                    help="grep output order: newest (default) or oldest (chronological)")
+    p.add_argument("--offset", type=int, default=0,
+                   help="Skip this many matches before reporting (0 = none)")
     p.add_argument("--search", metavar="QUERY",
                    help="BM25 text search (instead of regex grep)")
     p.add_argument("--fusion", action="store_true",
@@ -1503,9 +1509,9 @@ def main():
                       grep_limit=a.limit, grep_brief=a.brief)
         all_results.extend(res)
     if a.grep:
-        grep_search(all_results, a.grep, a.limit, a.brief, a.order)
+        grep_search(all_results, a.grep, a.limit, a.brief, a.order, a.offset)
     if a.search:
-        bm25_search(all_results, a.search, a.limit, a.brief, a.fusion, a.bm25l)
+        bm25_search(all_results, a.search, a.limit, a.brief, a.fusion, a.bm25l, a.offset)
 
 if __name__ == "__main__":
     if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
