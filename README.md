@@ -217,9 +217,9 @@ Each level overrides the previous, so project settings take priority over global
             // Minimum turn age before a message's reasoning is eligible
             "turns": 8,
             // Prune once reasoning parts exceed this count
-            "highWater": 30,
+            "highWater": 60,
             // Prune down to this many reasoning parts
-            "lowWater": 10,
+            "lowWater": 20,
             // Messages that called one of these tools keep their reasoning
             "protectedTools": [],
         },
@@ -281,8 +281,11 @@ To enable, set `view.enabled: true` and point `view.scriptPath` at your `VCC.py`
     "userTokenLimit": 256,
     "postMode": "notice",       // "off" | "notice" | "fullminview"
     "rotateKeep": 3,
+    "maxReturnChars": 49152,    // max chars of VCC grep/search output returned to the model
 }
 ```
+
+`view.maxReturnChars` caps the characters of VCC grep/search output returned to the model — a technical safeguard against context bloat. The policy is setup-specific (local vs provider-tiered context, long-context models); raise cautiously. It truncates the search result text only; full views remain on disk. Default is `48 * 1024` (48KB).
 
 When enabled, the `view` tool is registered: the model can grep the archived transcript on demand (`view` with a regex `pattern`) and get line-range references into the full transcript — no decompression needed.
 

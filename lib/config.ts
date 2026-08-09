@@ -79,6 +79,7 @@ export interface ViewConfig {
     userTokenLimit: number
     postMode: "fullminview" | "notice" | "off"
     rotateKeep: number
+    maxReturnChars?: number
 }
 
 export interface PluginConfig {
@@ -172,6 +173,7 @@ export const VALID_CONFIG_KEYS = new Set([
     "strategies.purgeReasoning.highWater",
     "strategies.purgeReasoning.lowWater",
     "strategies.purgeReasoning.protectedTools",
+    "view.maxReturnChars",
     "view",
     "view.enabled",
     "view.pythonPath",
@@ -802,6 +804,13 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                     actual: typeof view.rotateKeep,
                 })
             }
+            if (view.maxReturnChars !== undefined && typeof view.maxReturnChars !== "number") {
+                errors.push({
+                    key: "view.maxReturnChars",
+                    expected: "number",
+                    actual: typeof view.maxReturnChars,
+                })
+            }
         }
     }
 
@@ -909,8 +918,8 @@ const defaultConfig: PluginConfig = {
         purgeReasoning: {
             enabled: false,
             turns: 8,
-            highWater: 30,
-            lowWater: 10,
+            highWater: 60,
+            lowWater: 20,
             protectedTools: [],
         },
     },
@@ -924,6 +933,7 @@ const defaultConfig: PluginConfig = {
         userTokenLimit: 256,
         postMode: "notice",
         rotateKeep: 3,
+        maxReturnChars: 48 * 1024,
     },
 }
 
@@ -1149,6 +1159,7 @@ function mergeView(base: PluginConfig["view"], override?: Partial<PluginConfig["
         userTokenLimit: override.userTokenLimit ?? base.userTokenLimit,
         postMode: override.postMode ?? base.postMode,
         rotateKeep: override.rotateKeep ?? base.rotateKeep,
+        maxReturnChars: override.maxReturnChars ?? base.maxReturnChars,
     }
 }
 

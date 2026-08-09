@@ -8,14 +8,14 @@ import { partsToVccContent } from "./parts"
 import type { ToolContext } from "../compress/types"
 import { filterMessages } from "../messages/shape"
 
-const MAX_RETURN = 32 * 1024
-function truncateOutput(s: string, extra: string): string {
-    if (s.length <= MAX_RETURN) return s
-    return s.slice(0, MAX_RETURN) + "\n\n…[truncated] " + extra
+function truncateOutput(s: string, extra: string, maxChars: number): string {
+    if (s.length <= maxChars) return s
+    return s.slice(0, maxChars) + "\n\n…[truncated] " + extra
 }
 
 export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
     const viewConfig = ctx.config.view
+    const maxReturnChars = viewConfig.maxReturnChars ?? 48 * 1024
 
     return tool({
         description:
@@ -189,6 +189,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                         resultText,
                         "more matches — refine pattern (add .* or narrow terms) or read Full transcript:" +
                             exportPath.replace(/\.jsonl$/, ".txt"),
+                        maxReturnChars,
                     )
                 }
 
@@ -196,7 +197,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                     `VCC grep for \`${pattern}\` found no matches in the current session view.\n` +
                     `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
                     `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}\n` +
-                    `Compiler output:\n${truncateOutput(output, "compiler output truncated")}`
+                    `Compiler output:\n${truncateOutput(output, "compiler output truncated", maxReturnChars)}`
                 )
             }
 

@@ -362,13 +362,13 @@
                         },
                         "highWater": {
                             "type": "number",
-                            "default": 30,
-                            "description": "Prune once total reasoning parts in the request exceed this count"
+                            "default": 60,
+                            "description": "Prune once total reasoning parts in the request exceed this count. Conservative default (60) leaves headroom - reasoning stays intact longer; lower manually for more aggressive pruning"
                         },
                         "lowWater": {
                             "type": "number",
-                            "default": 10,
-                            "description": "Prune down to this many reasoning parts (must be less than highWater)"
+                            "default": 20,
+                            "description": "Prune down to this many reasoning parts (must be less than highWater). Conservative default (20) retains more reasoning after a prune burst; lower manually for more aggressive stripping"
                         },
                         "protectedTools": {
                             "type": "array",
@@ -432,6 +432,11 @@
                     "type": "number",
                     "default": 3,
                     "description": "Number of previous view files to keep as gzipped archives (.txt.1.gz, .txt.2.gz, ...). Old archives beyond this count are removed. Set to 0 to disable rotation."
+                },
+                "maxReturnChars": {
+                    "type": "number",
+                    "default": 49152,
+                    "description": "Maximum characters of VCC grep/search output returned to the model. A technical safeguard against context bloat - policy is setup-specific (local vs provider tiered context, long-context models). Raise cautiously; this truncates the search result text only, full views remain on disk."
                 }
             }
         }
