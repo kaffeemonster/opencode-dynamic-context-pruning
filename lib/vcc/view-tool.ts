@@ -19,7 +19,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
 
     return tool({
         description:
-            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results, offset=N to skip this many matches before reporting, order='newest'|'oldest' for grep output order. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance).",
+            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results, offset=N to skip this many matches before reporting, order='newest'|'oldest' for grep output order, fromLine=N to anchor at .txt line N, context=N to widen hits. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance).",
         args: {
             pattern: tool.schema
                 .string()
@@ -48,13 +48,21 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 .number()
                 .optional()
                 .describe("Skip this many matches before reporting (0 = none)"),
+            fromLine: tool.schema
+                .number()
+                .optional()
+                .describe("Only report blocks whose .txt start line is >= N"),
+            context: tool.schema
+                .number()
+                .optional()
+                .describe("Include N context lines around each match (grep) or show up to N lines (search)"),
             query: tool.schema
                 .string()
                 .optional()
                 .describe("Natural-language text search (BM25 ranking) — alternative to regex pattern"),
         },
         async execute(args, toolCtx) {
-            const { pattern, sessions, session, limit, brief, query, order, offset } = args as {
+            const { pattern, sessions, session, limit, brief, query, order, offset, fromLine, context } = args as {
                 pattern: string
                 sessions?: boolean
                 session?: string
@@ -63,6 +71,8 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 query?: string
                 order?: string
                 offset?: number
+                fromLine?: number
+                context?: number
             }
 
             if (!viewConfig.enabled) {
@@ -167,6 +177,10 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 String(offset ?? 0),
                 ...(query ? [] : ["--order", String(order ?? "newest")]),
                 ...(brief === true ? ["--brief"] : []),
+                "--from-line",
+                String(fromLine ?? 0),
+                "--context",
+                String(context ?? 0),
             ]
             const output = await new Promise<string>((resolve, reject) => {
                 execFile(viewConfig.pythonPath || "python3", vccArgs, { maxBuffer: 20 * 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
