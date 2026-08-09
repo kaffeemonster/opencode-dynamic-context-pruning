@@ -241,7 +241,7 @@ async function listSearchableSessions(
         )
     }
 
-    const titles = new Map<string, { title: string; updated: number }>()
+    const titles = new Map<string, { title: string; created: number; updated: number }>()
     try {
         const listRes = await ctx.client.session.list()
         const sessions = listRes.data || listRes
@@ -249,6 +249,7 @@ async function listSearchableSessions(
             for (const s of sessions) {
                 titles.set(s.id, {
                     title: s.title || "(untitled)",
+                    created: s.time?.created ?? 0,
                     updated: s.time?.updated ?? 0,
                 })
             }
@@ -265,6 +266,8 @@ async function listSearchableSessions(
         if (t) fallbackTitles.set(id, t)
     }
 
+    ids.sort((a, b) => (titles.get(b)?.updated ?? 0) - (titles.get(a)?.updated ?? 0))
+
     const lines = ids.map((id) => {
         const meta = titles.get(id)
         const fb = fallbackTitles.get(id)
@@ -274,7 +277,7 @@ async function listSearchableSessions(
             ? `"${fb}"`
             : null
         const suffix = shownTitle
-            ? ` — ${shownTitle}${meta ? ` — updated ${formatTime(meta.updated)}` : ""}`
+            ? ` — ${shownTitle}${meta ? ` — started ${formatTime(meta.created)} — updated ${formatTime(meta.updated)}` : ""}`
             : ""
         return `- \`${id}\`${suffix}`
     })
@@ -316,6 +319,5 @@ async function firstUserMessage(exportDir: string, sessionId: string): Promise<s
 function formatTime(ts: number): string {
     const d = new Date(ts)
     if (isNaN(d.getTime())) return "unknown"
-    const pad = (n: number) => String(n).padStart(2, "0")
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    return d.toISOString()
 }
