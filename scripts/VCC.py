@@ -974,17 +974,18 @@ def _rel_path(fp):
     except ValueError:
         return os.path.abspath(fp)
 
-def grep_search(results, pattern, limit=0, brief=False):
+def grep_search(results, pattern, limit=0, brief=False, order="newest"):
     first = True
     count = 0
-    for filepath, ir in reversed(results):
+    oldest = order == "oldest"
+    for filepath, ir in (results if oldest else reversed(results)):
         short = _rel_path(filepath)
         section_ts = {
             o.get("_sec"): o.get("_event_timestamp")
             for o in ir
             if o.get("type") == "meta_header" and o.get("_sec") is not None
         }
-        for o in reversed(ir):
+        for o in (ir if oldest else reversed(ir)):
             if not o["searchable"]: continue
             src = o["content_brief"] if brief else o["content"]
             lines = match_lines(src, pattern, short, o.get("start_line", 0) + 1)
@@ -1480,6 +1481,8 @@ def main():
                    help="Max block matches to report per file (0 = unlimited)")
     p.add_argument("--brief", action="store_true",
                    help="Search brief (min) view content instead of full content")
+    p.add_argument("--order", choices=["newest", "oldest"], default="newest",
+                   help="grep output order: newest (default) or oldest (chronological)")
     p.add_argument("--search", metavar="QUERY",
                    help="BM25 text search (instead of regex grep)")
     p.add_argument("--fusion", action="store_true",
@@ -1500,7 +1503,7 @@ def main():
                       grep_limit=a.limit, grep_brief=a.brief)
         all_results.extend(res)
     if a.grep:
-        grep_search(all_results, a.grep, a.limit, a.brief)
+        grep_search(all_results, a.grep, a.limit, a.brief, a.order)
     if a.search:
         bm25_search(all_results, a.search, a.limit, a.brief, a.fusion, a.bm25l)
 

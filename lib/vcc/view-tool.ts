@@ -19,7 +19,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
 
     return tool({
         description:
-            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance).",
+            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results, order='newest'|'oldest' for grep output order. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance).",
         args: {
             pattern: tool.schema
                 .string()
@@ -40,19 +40,24 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 .boolean()
                 .optional()
                 .describe("Search the brief/min view instead of full content"),
+            order: tool.schema
+                .string()
+                .optional()
+                .describe("grep output order: newest (default) or oldest (chronological)"),
             query: tool.schema
                 .string()
                 .optional()
                 .describe("Natural-language text search (BM25 ranking) — alternative to regex pattern"),
         },
         async execute(args, toolCtx) {
-            const { pattern, sessions, session, limit, brief, query } = args as {
+            const { pattern, sessions, session, limit, brief, query, order } = args as {
                 pattern: string
                 sessions?: boolean
                 session?: string
                 limit?: number
                 brief?: boolean
                 query?: string
+                order?: string
             }
 
             if (!viewConfig.enabled) {
@@ -153,6 +158,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 ...(query ? ["--search", query] : ["--grep", pattern]),
                 "--limit",
                 String(limit ?? 40),
+                ...(query ? [] : ["--order", String(order ?? "newest")]),
                 ...(brief === true ? ["--brief"] : []),
             ]
             const output = await new Promise<string>((resolve, reject) => {
