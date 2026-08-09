@@ -340,6 +340,7 @@ def parse(chain, outdir, data_prefix, data_ctr):
     sec = 0
     blk = 0
     active_timestamp = None
+    cur_rid = None
 
     tid_name = {}
     for r in chain:
@@ -354,7 +355,8 @@ def parse(chain, outdir, data_prefix, data_ctr):
 
     def _emit_header(h):
         ir.append(_node("meta_header", [h, ""], _sec=sec,
-                        _event_timestamp=active_timestamp))
+                        _event_timestamp=active_timestamp,
+                        _msg_id=cur_rid))
 
     def _emit_blocks(blocks, text_type):
         nonlocal blk
@@ -423,6 +425,7 @@ def parse(chain, outdir, data_prefix, data_ctr):
     for r in chain:
         rt = r.get("type")
         active_timestamp = r.get("timestamp")
+        cur_rid = (r.get("message") or {}).get("id")
 
         if rt == "system":
             if r.get("subtype") == "compact_boundary": continue
@@ -1041,6 +1044,38 @@ def grep_search(results, pattern, limit=0, brief=False, order="newest", offset=0
                 return
 
 
+def ref_locate(results, ref, limit=0):
+    # Find sections whose meta_header carries the given message id; print them with line refs.
+    found = False
+    count = 0
+    for filepath, ir in results:
+        short = _rel_path(filepath)
+        secs = {}  # sec -> list of nodes
+        for o in ir:
+            secs.setdefault(o.get("_sec"), []).append(o)
+        for o in ir:
+            if o.get("_msg_id") != ref or o["type"] != "meta_header":
+                continue
+            found = True
+            sec = o.get("_sec")
+            nodes = secs.get(sec, [])
+            start = min((n.get("start_line", 0) for n in nodes), default=0) + 1
+            end = max((n.get("start_line", 0) for n in nodes), default=0) + 1
+            if count:
+                print()
+            print(f"({short}:{start}-{end}) [{ref}] {sec or ''}")
+            for n in nodes:
+                content = n.get("content") or []
+                for i, line in enumerate(content):
+                    ln = n.get("start_line", 0) + 1 + i
+                    print(f"  {ln}: {line}")
+            count += 1
+            if limit and count >= limit:
+                return
+    if not found:
+        print(f"ref {ref} not found in session.")
+
+
 # ── BM25 text search ──
 
 _STOPWORDS_EN = frozenset(
@@ -1544,17 +1579,19 @@ def main():
                    help="RRF-fuse full and brief BM25F ranked lists (k=60)")
     p.add_argument("--bm25l", action="store_true",
                    help="use BM25L scoring instead of BM25F (no fusion)")
+    p.add_argument("--ref", metavar="ID",
+                   help="Locate a message by its id and print its section with line refs")
     a = p.parse_args()
     try:
         a.grep = re.compile(a.grep) if a.grep else None
     except re.error as e:
         p.error(f"invalid regex for --grep: {e}")
-    if a.grep and a.search:
-        p.error("use --grep OR --search, not both")
+    if sum(bool(x) for x in (a.grep, a.search, a.ref)) > 1:
+        p.error("use only one of --grep, --search, --ref")
     all_results = []
     for f in _expand_inputs(a.input):
         res = compile_pass(f, a.output_dir, a.truncate, a.truncate_user,
-                      a.grep, quiet=bool(a.grep or a.search),
+                      a.grep, quiet=bool(a.grep or a.search or a.ref),
                       grep_limit=a.limit, grep_brief=a.brief,
                       grep_offset=a.offset, grep_order=a.order,
                       grep_from_line=a.from_line, grep_context=a.context)
@@ -1565,6 +1602,8 @@ def main():
     if a.search:
         bm25_search(all_results, a.search, a.limit, a.brief, a.fusion, a.bm25l,
                     a.offset, a.from_line, a.context)
+    if a.ref:
+        ref_locate(all_results, a.ref, a.limit)
 
 if __name__ == "__main__":
     if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":

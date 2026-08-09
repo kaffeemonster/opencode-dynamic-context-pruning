@@ -463,6 +463,7 @@ async function exportSessionForVcc(
         type: string
         timestamp?: string
         message?: {
+            id?: string
             content?: any
             usage?: Record<string, number>
             model?: string
@@ -513,6 +514,7 @@ async function exportSessionForVcc(
                 ? new Date(msg.info.time.created).toISOString()
                 : new Date().toISOString(),
             message: {
+                id: msg.info.id,
                 content: content.length ? content : [],
             },
             metadata: {

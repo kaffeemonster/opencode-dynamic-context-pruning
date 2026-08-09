@@ -19,7 +19,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
 
     return tool({
         description:
-            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results, offset=N to skip this many matches before reporting, order='newest'|'oldest' for grep output order, fromLine=N to anchor at .txt line N, context=N to widen hits. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance).",
+            "Search the VCC conversation view. Compiles the session into a grep view and returns all blocks/lines matching the regex pattern, with line-range references into the full transcript. Set sessions=true to list all searchable sessions, or session='<id>' to search a specific one. Use brief=true to search the min view first, limit=N to cap results, offset=N to skip this many matches before reporting, order='newest'|'oldest' for grep output order, fromLine=N to anchor at .txt line N, context=N to widen hits. Pass query instead of pattern for natural-language BM25 text search (ranked by relevance). ref='<message-id>' to locate a message by id.",
         args: {
             pattern: tool.schema
                 .string()
@@ -60,15 +60,20 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 .string()
                 .optional()
                 .describe("Natural-language text search (BM25 ranking) — alternative to regex pattern"),
+            ref: tool.schema
+                .string()
+                .optional()
+                .describe("Locate a message by its id (message.id in export)"),
         },
         async execute(args, toolCtx) {
-            const { pattern, sessions, session, limit, brief, query, order, offset, fromLine, context } = args as {
+            const { pattern, sessions, session, limit, brief, query, ref, order, offset, fromLine, context } = args as {
                 pattern: string
                 sessions?: boolean
                 session?: string
                 limit?: number
                 brief?: boolean
                 query?: string
+                ref?: string
                 order?: string
                 offset?: number
                 fromLine?: number
@@ -152,7 +157,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                         typeof msg.info.time?.created === "number"
                             ? new Date(msg.info.time.created).toISOString()
                             : new Date().toISOString(),
-                    message: { content: content.length ? content : [] },
+                    message: { id: msg.info.id, content: content.length ? content : [] },
                 })
             }
 
@@ -170,12 +175,12 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
             const vccArgs = [
                 viewConfig.scriptPath,
                 exportPath,
-                ...(query ? ["--search", query] : ["--grep", pattern]),
+                ...(ref ? ["--ref", ref] : query ? ["--search", query] : ["--grep", pattern]),
                 "--limit",
                 String(limit ?? 40),
                 "--offset",
                 String(offset ?? 0),
-                ...(query ? [] : ["--order", String(order ?? "newest")]),
+                ...(query || ref ? [] : ["--order", String(order ?? "newest")]),
                 ...(brief === true ? ["--brief"] : []),
                 "--from-line",
                 String(fromLine ?? 0),
@@ -196,7 +201,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 })
             })
 
-            if (!query) {
+            if (!query && !ref) {
                 // Read the .view.txt if it exists (grep mode only — BM25 search
                 // never writes a view file)
                 const viewPath = exportPath.replace(/\.jsonl$/, ".view.txt")
@@ -231,14 +236,14 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
             // BM25 search mode: stdout IS the ranked result
             if (output.trim()) {
                 return (
-                    `**VCC search matches for \`${query}\`:**\n\n` +
+                    `**VCC ${ref ? "ref" : "search"} matches for \`${ref || query}\`:**\n\n` +
                     output +
                     `\n\nFull transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}`
                 )
             }
 
             return (
-                `VCC search for \`${query}\` found no matches in the current session view.\n` +
+                `VCC ${ref ? "ref" : "search"} for \`${ref || query}\` found no matches in the current session view.\n` +
                 `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
                 `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}`
             )
