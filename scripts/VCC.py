@@ -852,7 +852,8 @@ def lower_brief(ir, truncate, filename="", truncate_user=256):
 
 # ── lowering: view ──
 
-def lower_view(ir, filename="", grep_pattern=None, limit=0, brief=False):
+def lower_view(ir, filename="", grep_pattern=None, limit=0, brief=False,
+               offset=0, order="newest"):
     if not grep_pattern:
         # No grep: view is same as truncated (shouldn't normally be called)
         for o in ir:
@@ -875,16 +876,19 @@ def lower_view(ir, filename="", grep_pattern=None, limit=0, brief=False):
 
     # Pass 1: determine visibility for each searchable block
     block_visible = {}  # blk -> bool
+    match_order = []    # blk ids, chronological match order (visible only)
     count = 0
     for o in ir:
         blk = o.get("_blk")
         if blk is None or blk in block_visible:
             continue
         if o["searchable"] and _node_matches(o):
-            block_visible[blk] = True
             count += 1
-            if limit and count >= limit:
-                break
+            if count > offset:
+                block_visible[blk] = True
+                match_order.append(blk)
+                if limit and len(match_order) >= limit:
+                    break
 
     # Derive which sections have any visible block (for header/separator logic)
     sec_has_visible = set()
@@ -895,65 +899,69 @@ def lower_view(ir, filename="", grep_pattern=None, limit=0, brief=False):
             if s is not None:
                 sec_has_visible.add(s)
 
-    # Pass 2: set content_view for each node
-    for idx, o in enumerate(ir):
-        s = o.get("_sec")
-        blk = o.get("_blk")
+    # Pass 2: set content_view for each node (emission order = order param)
+    def _emit_view(idx_o_iter):
+        for idx, o in idx_o_iter:
+            s = o.get("_sec")
+            blk = o.get("_blk")
 
-        # Separator: show only between two sections that have visible blocks
-        if s is None and o["type"] == "meta" and SEP in o.get("content", []):
-            next_vis = False
-            for j in range(idx + 1, len(ir)):
-                ns = ir[j].get("_sec")
-                if ns is not None:
-                    next_vis = ns in sec_has_visible
-                    break
-            prev_vis = False
-            seen = set()
-            for j in range(idx - 1, -1, -1):
-                ps = ir[j].get("_sec")
-                if ps is not None and ps not in seen:
-                    seen.add(ps)
-                    if ps in sec_has_visible:
-                        prev_vis = True
+            # Separator: show only between two sections that have visible blocks
+            if s is None and o["type"] == "meta" and SEP in o.get("content", []):
+                next_vis = False
+                for j in range(idx + 1, len(ir)):
+                    ns = ir[j].get("_sec")
+                    if ns is not None:
+                        next_vis = ns in sec_has_visible
                         break
-            o["content_view"] = list(o["content"]) if (next_vis and prev_vis) else None
-            continue
-
-        # meta_header: show if section has any visible block
-        if o["type"] == "meta_header":
-            o["content_view"] = list(o["content"]) if s in sec_has_visible else None
-            continue
-
-        # Thinking / tool_call metas: show if same blk matched
-        if o["type"] == "meta" and o.get("content", []):
-            c0 = o["content"][0]
-            if c0.startswith(">>>thinking") or c0.startswith("<<<thinking") or \
-               c0.startswith(">>>redacted_thinking") or c0.startswith("<<<redacted_thinking") or \
-               c0.startswith(">>>tool_call ") or c0 == "<<<tool_call":
-                o["content_view"] = list(o["content"]) if block_visible.get(blk) else None
+                prev_vis = False
+                seen = set()
+                for j in range(idx - 1, -1, -1):
+                    ps = ir[j].get("_sec")
+                    if ps is not None and ps not in seen:
+                        seen.add(ps)
+                        if ps in sec_has_visible:
+                            prev_vis = True
+                            break
+                o["content_view"] = list(o["content"]) if (next_vis and prev_vis) else None
                 continue
 
-        # Other meta → show if section has visible blocks
-        if o["type"] == "meta":
-            o["content_view"] = list(o["content"]) if s in sec_has_visible else None
-            continue
-
-        # Searchable content blocks: show only if this block matches
-        if o["searchable"]:
-            if limit and not block_visible.get(blk):
-                o["content_view"] = None
+            # meta_header: show if section has any visible block
+            if o["type"] == "meta_header":
+                o["content_view"] = list(o["content"]) if s in sec_has_visible else None
                 continue
-            if _node_matches(o):
-                node_start = o.get("start_line", 0) + 1
-                o["content_view"] = match_lines(
-                    o["content"], grep_pattern, short, node_start)
-            else:
-                o["content_view"] = None
-            continue
 
-        # Non-searchable (images, docs, etc) → hide
-        o["content_view"] = None
+            # Thinking / tool_call metas: show if same blk matched
+            if o["type"] == "meta" and o.get("content", []):
+                c0 = o["content"][0]
+                if c0.startswith(">>>thinking") or c0.startswith("<<<thinking") or \
+                   c0.startswith(">>>redacted_thinking") or c0.startswith("<<<redacted_thinking") or \
+                   c0.startswith(">>>tool_call ") or c0 == "<<<tool_call":
+                    o["content_view"] = list(o["content"]) if block_visible.get(blk) else None
+                    continue
+
+            # Other meta → show if section has visible blocks
+            if o["type"] == "meta":
+                o["content_view"] = list(o["content"]) if s in sec_has_visible else None
+                continue
+
+            # Searchable content blocks: show only if this block matches
+            if o["searchable"]:
+                if limit and not block_visible.get(blk):
+                    o["content_view"] = None
+                    continue
+                if _node_matches(o):
+                    node_start = o.get("start_line", 0) + 1
+                    o["content_view"] = match_lines(
+                        o["content"], grep_pattern, short, node_start)
+                else:
+                    o["content_view"] = None
+                continue
+
+            # Non-searchable (images, docs, etc) → hide
+            o["content_view"] = None
+
+    _emit_view(enumerate(ir) if order == "oldest"
+               else reversed(list(enumerate(ir))))
 
 
 # ── codegen ──
@@ -1402,7 +1410,8 @@ def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False,
 # ── compile ──
 
 def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
-            grep_pattern=None, quiet=False, grep_limit=0, grep_brief=False):
+            grep_pattern=None, quiet=False, grep_limit=0, grep_brief=False,
+            grep_offset=0, grep_order="newest"):
     if output_dir is None:
         output_dir = os.path.dirname(os.path.abspath(input_path)) or "."
     os.makedirs(output_dir, exist_ok=True)
@@ -1442,8 +1451,11 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
         with open(mp, "w", encoding="utf-8") as f: f.write("\n".join(brief))
 
         if grep_pattern:
-            lower_view(ir, ffn, grep_pattern, grep_limit, grep_brief)
+            lower_view(ir, ffn, grep_pattern, grep_limit, grep_brief,
+                       grep_offset, grep_order)
             view = emit(ir, "content_view")
+            if grep_order == "newest":
+                view.reverse()
             with open(vp, "w", encoding="utf-8") as f: f.write("\n".join(view))
 
         ft, bt = "\n".join(full), "\n".join(brief)
@@ -1506,7 +1518,8 @@ def main():
     for f in _expand_inputs(a.input):
         res = compile_pass(f, a.output_dir, a.truncate, a.truncate_user,
                       a.grep, quiet=bool(a.grep or a.search),
-                      grep_limit=a.limit, grep_brief=a.brief)
+                      grep_limit=a.limit, grep_brief=a.brief,
+                      grep_offset=a.offset, grep_order=a.order)
         all_results.extend(res)
     if a.grep:
         grep_search(all_results, a.grep, a.limit, a.brief, a.order, a.offset)
