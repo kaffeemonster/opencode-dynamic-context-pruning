@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { execFile } from "child_process"
 import * as fs from "fs/promises"
-import { join } from "path"
+import { dirname, join } from "path"
 import { STORAGE_DIR } from "../state/persistence"
 import { rotateViewFiles } from "./rotate"
 import { partsToVccContent } from "./parts"
@@ -171,6 +171,65 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
             // Rotate previous view files before VCC overwrites them
             await rotateViewFiles(exportPath, viewConfig.rotateKeep ?? 3)
 
+            // Semantic search first (optional sidecar), fall back to BM25
+            let semanticNote: string | null = null
+            if (query && viewConfig.semantic?.enabled) {
+                const semanticScript =
+                    viewConfig.semantic.scriptPath ||
+                    join(dirname(viewConfig.scriptPath), "vcc-semantic.py")
+                const semanticArgs = [
+                    semanticScript,
+                    exportPath,
+                    "--query",
+                    query,
+                    "--limit",
+                    String(limit ?? 5),
+                    "--provider",
+                    viewConfig.semantic.provider ?? "api",
+                    ...(viewConfig.semantic.apiUrl
+                        ? ["--api-url", viewConfig.semantic.apiUrl]
+                        : []),
+                    ...(viewConfig.semantic.apiKey
+                        ? ["--api-key", viewConfig.semantic.apiKey]
+                        : []),
+                    ...(viewConfig.semantic.model
+                        ? ["--model", viewConfig.semantic.model]
+                        : []),
+                ]
+                try {
+                    const semanticOutput = await new Promise<string>((resolve, reject) => {
+                        execFile(
+                            viewConfig.pythonPath || "python3",
+                            semanticArgs,
+                            { maxBuffer: 20 * 1024 * 1024 },
+                            (error: any, stdout: string, stderr: string) => {
+                                if (error) {
+                                    reject(
+                                        new Error(
+                                            stderr?.split("\n")[0] || error.message,
+                                        ),
+                                    )
+                                } else {
+                                    resolve(stdout || "")
+                                }
+                            },
+                        )
+                    })
+                    return truncateOutput(
+                        `**VCC semantic matches for \`${query}\`:**\n\n` +
+                            semanticOutput +
+                            `\n\nExport: ${exportPath}`,
+                        "more matches — narrow the query or read the export",
+                        maxReturnChars,
+                    )
+                } catch (err: any) {
+                    console.warn(
+                        `[vcc-semantic] unavailable, falling back to BM25: ${err?.message}`,
+                    )
+                    semanticNote = `(semantic unavailable — ${err?.message}; showing BM25)`
+                }
+            }
+
             // Run VCC grep
             const vccArgs = [
                 viewConfig.scriptPath,
@@ -237,6 +296,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
             if (output.trim()) {
                 return (
                     `**VCC ${ref ? "ref" : "search"} matches for \`${ref || query}\`:**\n\n` +
+                    (semanticNote ? semanticNote + "\n\n" : "") +
                     output +
                     `\n\nFull transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}`
                 )
@@ -244,6 +304,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
 
             return (
                 `VCC ${ref ? "ref" : "search"} for \`${ref || query}\` found no matches in the current session view.\n` +
+                (semanticNote ? semanticNote + "\n" : "") +
                 `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
                 `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}`
             )

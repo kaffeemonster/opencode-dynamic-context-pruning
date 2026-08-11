@@ -80,6 +80,14 @@ export interface ViewConfig {
     postMode: "fullminview" | "notice" | "off"
     rotateKeep: number
     maxReturnChars?: number
+    semantic?: {
+        enabled: boolean
+        provider?: "api" | "onnx"
+        apiUrl?: string
+        apiKey?: string
+        model?: string
+        scriptPath?: string
+    }
 }
 
 export interface PluginConfig {
@@ -184,6 +192,13 @@ export const VALID_CONFIG_KEYS = new Set([
     "view.userTokenLimit",
     "view.postMode",
     "view.rotateKeep",
+    "view.semantic",
+    "view.semantic.enabled",
+    "view.semantic.provider",
+    "view.semantic.apiUrl",
+    "view.semantic.apiKey",
+    "view.semantic.model",
+    "view.semantic.scriptPath",
 ])
 
 function getConfigKeyPaths(obj: Record<string, any>, prefix = ""): string[] {
@@ -811,6 +826,41 @@ export function validateConfigTypes(config: Record<string, any>): ValidationErro
                     actual: typeof view.maxReturnChars,
                 })
             }
+            if (view.semantic !== undefined) {
+                if (
+                    typeof view.semantic !== "object" ||
+                    view.semantic === null ||
+                    Array.isArray(view.semantic)
+                ) {
+                    errors.push({
+                        key: "view.semantic",
+                        expected: "object",
+                        actual: typeof view.semantic,
+                    })
+                } else {
+                    if (
+                        view.semantic.enabled !== undefined &&
+                        typeof view.semantic.enabled !== "boolean"
+                    ) {
+                        errors.push({
+                            key: "view.semantic.enabled",
+                            expected: "boolean",
+                            actual: typeof view.semantic.enabled,
+                        })
+                    }
+                    if (
+                        view.semantic.provider !== undefined &&
+                        view.semantic.provider !== "api" &&
+                        view.semantic.provider !== "onnx"
+                    ) {
+                        errors.push({
+                            key: "view.semantic.provider",
+                            expected: '"api" | "onnx"',
+                            actual: JSON.stringify(view.semantic.provider),
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -934,6 +984,7 @@ const defaultConfig: PluginConfig = {
         postMode: "notice",
         rotateKeep: 3,
         maxReturnChars: 48 * 1024,
+        semantic: { enabled: false },
     },
 }
 
@@ -1147,6 +1198,22 @@ function mergeExperimental(
     }
 }
 
+function mergeSemantic(
+    base: ViewConfig["semantic"],
+    override?: ViewConfig["semantic"],
+): ViewConfig["semantic"] {
+    if (!base) return override ?? { enabled: false }
+    if (!override) return base
+    return {
+        enabled: override.enabled ?? base.enabled,
+        provider: override.provider ?? base.provider,
+        apiUrl: override.apiUrl ?? base.apiUrl,
+        apiKey: override.apiKey ?? base.apiKey,
+        model: override.model ?? base.model,
+        scriptPath: override.scriptPath ?? base.scriptPath,
+    }
+}
+
 function mergeView(base: PluginConfig["view"], override?: Partial<PluginConfig["view"]>): PluginConfig["view"] {
     if (!override) return base
     return {
@@ -1160,6 +1227,7 @@ function mergeView(base: PluginConfig["view"], override?: Partial<PluginConfig["
         postMode: override.postMode ?? base.postMode,
         rotateKeep: override.rotateKeep ?? base.rotateKeep,
         maxReturnChars: override.maxReturnChars ?? base.maxReturnChars,
+        semantic: mergeSemantic(base.semantic, override.semantic),
     }
 }
 
