@@ -213,6 +213,8 @@ def main():
     p.add_argument("--model", default=None)
     p.add_argument("--cache", default=None)
     p.add_argument("--dims", type=int, default=None)
+    p.add_argument("--map", default=None,
+                   help="path to section map json (default: next to export)")
     p.add_argument("--no-cache", action="store_true")
     a = p.parse_args()
 
@@ -239,7 +241,8 @@ def main():
             text = _record_text(r)
             if not text.strip():
                 continue
-            items.append({"line": ln, "text": text, "text_hash": _text_hash(text)})
+            msg_id = (r.get("message") or {}).get("id")
+            items.append({"line": ln, "text": text, "text_hash": _text_hash(text), "msg_id": msg_id})
     if not items:
         print("No searchable records in export.")
         return
@@ -270,6 +273,18 @@ def main():
                 "vcc-semantic: rebuilding cache (provider/dims mismatch)\n"
             )
             sys.stderr.flush()
+
+    # ── section map: msg_id → .txt line span ──
+    map_path = a.map or (os.path.splitext(export_path)[0] + ".map.json")
+    sec_map = {}
+    if os.path.exists(map_path):
+        try:
+            _sm = json.load(open(map_path, encoding="utf-8"))
+            sec_map = _sm.get("sections", {})
+            sys.stderr.write(f"vcc-semantic: using section map ({len(sec_map)} ids)\n")
+            sys.stderr.flush()
+        except Exception:
+            sec_map = {}
 
     # ── embeddings (reuse cached vecs by line+text_hash) ──
     vecs = [None] * len(items)
@@ -315,6 +330,7 @@ def main():
                             {
                                 "line": it["line"],
                                 "text_hash": it["text_hash"],
+                                "msg_id": it.get("msg_id"),
                                 "text": "\n".join(_preview(it["text"])),
                                 "vec": vecs[k],
                             }
@@ -340,7 +356,15 @@ def main():
             break
         if count:
             out.append("")
-        out.append(f"({short}:{items[k]['line']}) [semantic] score={sc:.2f}")
+        it = items[k]
+        ref = None
+        mids = sec_map.get(it.get("msg_id"))
+        if mids:
+            m0 = mids[0]
+            ref = f"({_rel_path(m0['txt'])}:{m0['start']}-{m0['end']})"
+        if ref is None:
+            ref = f"({short}:{it['line']})"
+        out.append(f"{ref} [semantic] score={sc:.2f}")
         for line in _preview(items[k]["text"]):
             out.append("  " + line)
         count += 1

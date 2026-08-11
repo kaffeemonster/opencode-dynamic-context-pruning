@@ -1493,6 +1493,7 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
         return []
 
     results, paths = [], []
+    map_entries = {}
 
     for i, chain in enumerate(chains):
         sfx = f"_{i+1}" if len(chains) > 1 else ""
@@ -1506,6 +1507,25 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
 
         ir = parse(chain, output_dir, f"{base}{sfx}", data_ctr)
         assign_lines(ir)
+        # compute per-section .txt line span and map msg_id → span
+        sec_lines = {}
+        for o in ir:
+            s = o.get("_sec")
+            if s is None:
+                continue
+            sl = o.get("start_line", 0)
+            el = o.get("end_line", 0)
+            a = sec_lines.setdefault(s, [None, None])
+            a[0] = sl if a[0] is None else min(a[0], sl)
+            a[1] = el if a[1] is None else max(a[1], el)
+        for o in ir:
+            if o["type"] == "meta_header" and o.get("_msg_id"):
+                s = o.get("_sec")
+                if s in sec_lines:
+                    sl, el = sec_lines[s]
+                    map_entries.setdefault(o["_msg_id"], []).append({
+                        "txt": ffn, "start": sl + 1, "end": el + 1
+                    })
         lower_brief(ir, truncate, ffn, truncate_user)
 
         full = emit(ir, "content")
@@ -1532,6 +1552,11 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
         paths.append((fp, mp, vp if grep_pattern else None,
                        len(full), _cnt(ft), len(brief), _cnt(bt)))
 
+    if map_entries:
+        map_path = os.path.join(output_dir, base + ".map.json")
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "sections": map_entries}, f)
+
     if not quiet:
         for fp, _, _, fl, fw, _, _ in paths:
             print(f"  {fp}  ({fl} lines, {fw} words)")
@@ -1541,6 +1566,8 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
             for _, _, vp, _, _, _, _ in paths:
                 if vp:
                     print(f"  {vp}")
+        if map_entries:
+            print(f"  {os.path.join(output_dir, base + '.map.json')}  (wrote section map: {len(map_entries)} ids)")
 
     return results
 
