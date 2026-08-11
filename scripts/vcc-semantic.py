@@ -29,7 +29,16 @@ import urllib.request
 
 _BATCH = 32
 _MODEL_API_DEFAULT = "harrier-oss-v1-0.6B-Embed"
-_ONNX_DEFAULT = os.path.expanduser("~/.cache/vcc/all-MiniLM-L6-v2/model.onnx")
+
+
+def _cache_dir():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    return os.path.join(base, "vcc", "all-MiniLM-L6-v2")
+
+
+_ONNX_DEFAULT = os.path.join(_cache_dir(), "model.onnx")
 _ONNX_URL = (
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/"
     "resolve/main/onnx/model_qint8_avx512_vnni.onnx"
