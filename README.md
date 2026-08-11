@@ -282,12 +282,35 @@ To enable, set `view.enabled: true` and point `view.scriptPath` at your `VCC.py`
     "postMode": "notice",       // "off" | "notice" | "fullminview"
     "rotateKeep": 3,
     "maxReturnChars": 49152,    // max chars of VCC grep/search output returned to the model
+    "semantic": {               // optional semantic search (see below)
+        "enabled": false,
+        "provider": "api",      // "api" (OpenAI-compatible /v1/embeddings) | "onnx" (local MiniLM)
+        "apiUrl": "http://127.0.0.1:8012/v1/embeddings",
+        "apiKey": "",
+        "model": "harrier-oss-v1-0.6B-Embed"   // api: model id; onnx: path to model.onnx
+    }
 }
 ```
 
 `view.maxReturnChars` caps the characters of VCC grep/search output returned to the model — a technical safeguard against context bloat. The policy is setup-specific (local vs provider-tiered context, long-context models); raise cautiously. It truncates the search result text only; full views remain on disk. Default is `48 * 1024` (48KB).
 
 When enabled, the `view` tool is registered: the model can grep the archived transcript on demand (`view` with a regex `pattern`) and get line-range references into the full transcript — no decompression needed.
+
+The `view` tool supports result navigation and anchoring (both grep and BM25 search):
+- `limit` / `offset` / `order: "newest" | "oldest"` — pagination over match lists.
+- `fromLine: N` — restrict results to transcript lines `>= N` (re-anchor beyond the result limit).
+- `context: N` — widen each hit with `N` surrounding lines.
+- `ref: "<message-id>"` — jump straight to the section of a specific message (ids are stamped as `message.id` in the export).
+- `query: "<text>"` — natural-language BM25 search instead of regex.
+
+### Semantic Search (optional sidecar)
+
+Beyond keyword/BM25 search, DCP ships an optional semantic search sidecar (`scripts/vcc-semantic.py`). It embeds each record's text and ranks by cosine similarity, so natural-language queries ("why did the auth flow break?") find relevant messages even when no keyword matches.
+
+- `provider: "api"` — POSTs to any OpenAI-compatible `/v1/embeddings` endpoint (e.g. a local llama.cpp server) using only the stdlib — zero pip dependencies.
+- `provider: "onnx"` — runs `all-MiniLM-L6-v2` locally (384-dim) via `onnxruntime` + `tokenizers` + `numpy`. Model + tokenizer auto-download on first use to `$XDG_CACHE_HOME/vcc/all-MiniLM-L6-v2/` (default `~/.cache/vcc/...`).
+- Embeddings are cached next to the export (`<export>.emb.json`), incrementally: re-runs embed only new records.
+- **Failure isolation**: if semantic search fails (server down, missing deps, bad model), the tool logs a warning and falls back to BM25 with a one-line note. Grep, ref and anchor paths are never affected.
 
 Commands:
 - `/dcp view-export` — write the session snapshot to the VCC jsonl format.
