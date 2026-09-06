@@ -9,6 +9,12 @@ Produces per conversation chain:
 Usage:
   python VCC.py conversation.jsonl              # .txt + .min.txt
   python VCC.py conversation.jsonl --grep "kw"  # + .view.txt + stdout search hits
+  python VCC.py conversation.jsonl --search "kw"            # BM25 relevance search (--fusion/--bm25l, EN/DE + CJK)
+  python VCC.py conversation.jsonl --grep "kw" --limit 5    # cap matches
+  python VCC.py conversation.jsonl --grep "kw" --order oldest --offset 10   # chronological + pagination
+  python VCC.py conversation.jsonl --grep "kw" --from-line 20000 --context 3   # line-anchored window
+  python VCC.py conversation.jsonl --search "kw" --sec-level  # fold to per-message spans
+  python VCC.py conversation.jsonl --ref <msg_id>   # locate a message by id (uses map.json sections)
   python VCC.py conversation.jsonl -t 128       # truncation limit (tokens, default 128)
   python VCC.py conversation.jsonl -tu 256      # user message truncation limit (default 256)
   python VCC.py conversation.jsonl -o outdir    # output directory
