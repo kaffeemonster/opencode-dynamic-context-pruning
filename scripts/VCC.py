@@ -877,10 +877,9 @@ def lower_view(ir, filename="", grep_pattern=None, limit=0, brief=False,
                 return True
         return False
 
-    # Pass 1: determine visibility for each searchable block
-    block_visible = {}  # blk -> bool
-    match_order = []    # blk ids, chronological match order (visible only)
-    count = 0
+    # Pass 1: collect ALL matching blocks (full map for dedup; no offset/limit gate)
+    block_visible = {}  # blk -> bool (all matching, pre-filter)
+    match_order = []    # ALL matching blk ids, chronological order
     for o in ir:
         blk = o.get("_blk")
         if blk is None or blk in block_visible:
@@ -889,12 +888,21 @@ def lower_view(ir, filename="", grep_pattern=None, limit=0, brief=False,
             if from_line and o.get("start_line", 0) + 1 < from_line:
                 continue
             if _node_matches(o):
-                count += 1
-                if count > offset:
-                    block_visible[blk] = True
-                    match_order.append(blk)
-                    if limit and len(match_order) >= limit:
-                        break
+                block_visible[blk] = True
+                match_order.append(blk)
+
+    # Apply offset+limit in OUTPUT order (matches grep_search: newest-first skip)
+    if order == "newest":
+        emit_order = list(reversed(match_order))
+    else:
+        emit_order = match_order
+    visible_set = set()
+    for i, blk in enumerate(emit_order):
+        if i >= offset:
+            visible_set.add(blk)
+            if limit and len(visible_set) >= limit:
+                break
+    block_visible = {blk: (blk in visible_set) for blk in block_visible}
 
     # Derive which sections have any visible block (for header/separator logic)
     sec_has_visible = set()
