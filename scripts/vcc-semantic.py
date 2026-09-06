@@ -27,6 +27,13 @@ import sys
 import urllib.error
 import urllib.request
 
+_NP = None
+try:
+    import numpy as _np
+    _NP = _np
+except ImportError:
+    _NP = None
+
 _BATCH = 32
 _MODEL_API_DEFAULT = "harrier-oss-v1-0.6B-Embed"
 
@@ -58,6 +65,12 @@ def _rel_path(fp):
 
 def _text_hash(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _cache_path(export_path):
+    if _NP is not None:
+        return export_path + ".emb.npz"
+    return export_path + ".emb.json"
 
 
 def _record_text(r):
@@ -248,12 +261,35 @@ def main():
         return
 
     # ── cache ──
-    cache_path = a.cache or (export_path + ".emb.json")
+    cache_path = a.cache or _cache_path(export_path)
+    if not a.cache and not os.path.exists(cache_path):
+        alt = export_path + (".emb.json" if cache_path.endswith(".npz") else ".emb.npz")
+        if os.path.exists(alt):
+            cache_path = alt
     cache_map = None
+    stored = None
     if not a.no_cache and os.path.exists(cache_path):
         try:
-            with open(cache_path, encoding="utf-8") as f:
-                stored = json.load(f)
+            if _NP is not None and cache_path.endswith(".npz"):
+                z = _NP.load(cache_path, allow_pickle=True)
+                if "provider" in z:
+                    stored = {
+                        "provider": z["provider"].item(),
+                        "dims": int(z["dims"].item()),
+                        "items": [
+                            {
+                                "line": int(ln),
+                                "text_hash": hsh,
+                                "vec": [float(x) for x in v],
+                            }
+                            for ln, hsh, v in zip(
+                                z["lines"], z["hashes"], z["vecs"]
+                            )
+                        ],
+                    }
+            else:
+                with open(cache_path, encoding="utf-8") as f:
+                    stored = json.load(f)
         except Exception:
             stored = None
         if (
@@ -321,24 +357,37 @@ def main():
     # ── persist cache ──
     if not a.no_cache:
         try:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "provider": a.provider,
-                        "dims": dims,
-                        "items": [
-                            {
-                                "line": it["line"],
-                                "text_hash": it["text_hash"],
-                                "msg_id": it.get("msg_id"),
-                                "text": "\n".join(_preview(it["text"])),
-                                "vec": vecs[k],
-                            }
-                            for k, it in enumerate(items)
-                        ],
-                    },
-                    f,
+            use_npz = _NP is not None and not a.cache
+            save_path = _cache_path(export_path) if use_npz else cache_path
+            if use_npz:
+                _NP.savez(
+                    save_path,
+                    provider=_NP.array(a.provider),
+                    dims=_NP.array(dims),
+                    lines=_NP.array([it["line"] for it in items], dtype=_NP.int64),
+                    hashes=_NP.array([it["text_hash"] for it in items], dtype=object),
+                    msg_ids=_NP.array([it.get("msg_id") or "" for it in items], dtype=object),
+                    vecs=_NP.array([vecs[k] for k in range(len(items))], dtype=_NP.float32),
                 )
+            else:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "provider": a.provider,
+                            "dims": dims,
+                            "items": [
+                                {
+                                    "line": it["line"],
+                                    "text_hash": it["text_hash"],
+                                    "msg_id": it.get("msg_id"),
+                                    "text": "\n".join(_preview(it["text"])),
+                                    "vec": vecs[k],
+                                }
+                                for k, it in enumerate(items)
+                            ],
+                        },
+                        f,
+                    )
         except OSError as e:
             sys.stderr.write(f"vcc-semantic: cache write failed: {e}\n")
             sys.stderr.flush()
