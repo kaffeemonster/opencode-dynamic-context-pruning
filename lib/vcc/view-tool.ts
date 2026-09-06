@@ -13,6 +13,80 @@ function truncateOutput(s: string, extra: string, maxChars: number): string {
     return s.slice(0, maxChars) + "\n\n…[truncated] " + extra
 }
 
+// ── hybrid fusion helpers ──
+
+interface FusionEntry {
+    txt: string
+    start: number
+    end: number
+    score: number
+    source: "bm25" | "sem"
+    preview: string[]
+}
+
+const FUSION_LINE_RE = /\((.*?):(\d+)-(\d+)\) \[[^\]]+\] score=([\d.]+)/
+
+function parseFusionOutput(out: string, source: "bm25" | "sem"): FusionEntry[] {
+    const entries: FusionEntry[] = []
+    let current: FusionEntry | null = null
+    for (const line of out.split("\n")) {
+        const m = FUSION_LINE_RE.exec(line)
+        if (m) {
+            current = {
+                txt: m[1].split(/[\\/]/).pop() || m[1],
+                start: +m[2],
+                end: +m[3],
+                score: +m[4],
+                source,
+                preview: [],
+            }
+            entries.push(current)
+        } else if (current && /^\s+\S/.test(line)) {
+            current.preview.push(line.trimStart())
+        }
+    }
+    return entries
+}
+
+function fuseEntries(
+    lists: [FusionEntry[], FusionEntry[]],
+): Array<{
+    entry: FusionEntry
+    rrf: number
+    bm25: number | null
+    sem: number | null
+    semPreview: string[]
+}> {
+    const K = 60
+    const merged = new Map<string, {
+        entry: FusionEntry
+        rrf: number
+        bm25: number | null
+        sem: number | null
+        semPreview: string[]
+    }>()
+    const keyFor = (e: FusionEntry) => `${e.txt}:${e.start}-${e.end}`
+    lists.forEach((list, li) => {
+        const src = li === 0 ? "bm25" : "sem"
+        list.forEach((e, r) => {
+            const key = keyFor(e)
+            let m = merged.get(key)
+            if (!m) {
+                m = { entry: e, rrf: 0, bm25: null, sem: null, semPreview: [] }
+                merged.set(key, m)
+            }
+            if (src === "bm25") {
+                m.bm25 = e.score
+            } else {
+                m.sem = e.score
+                m.semPreview = e.preview
+            }
+            m.rrf += 1 / (K + r + 1)
+        })
+    })
+    return [...merged.values()].sort((a, b) => b.rrf - a.rrf)
+}
+
 export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
     const viewConfig = ctx.config.view
     const maxReturnChars = viewConfig.maxReturnChars ?? 48 * 1024
@@ -64,9 +138,13 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 .string()
                 .optional()
                 .describe("Locate a message by its id (message.id in export)"),
+            fusion: tool.schema
+                .boolean()
+                .optional()
+                .describe("hybrid semantic+BM25 RRF fusion, requires query; runs both rankers in parallel at per-message span and merges by rank (k=60). limit applies post-merge; offset is not passed to rankers."),
         },
         async execute(args, toolCtx) {
-            const { pattern, sessions, session, limit, brief, query, ref, order, offset, fromLine, context } = args as {
+            const { pattern, sessions, session, limit, brief, query, ref, order, offset, fromLine, context, fusion } = args as {
                 pattern: string
                 sessions?: boolean
                 session?: string
@@ -78,6 +156,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 offset?: number
                 fromLine?: number
                 context?: number
+                fusion?: boolean
             }
 
             if (!viewConfig.enabled) {
@@ -89,6 +168,13 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
             if (!viewConfig.scriptPath) {
                 throw new Error(
                     "VCC script path not configured. Set view.scriptPath in dcp.jsonc",
+                )
+            }
+
+            if (fusion && !query) {
+                return (
+                    "fusion requires query (a natural-language search). " +
+                    "Pass query together with fusion=true; ref/pattern are not fusible."
                 )
             }
 
@@ -173,6 +259,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
 
             // Semantic search first (optional sidecar), fall back to BM25
             let semanticNote: string | null = null
+            let semanticOutput: string | null = null
             if (query && viewConfig.semantic?.enabled) {
                 const semanticScript =
                     viewConfig.semantic.scriptPath ||
@@ -195,9 +282,10 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                     ...(viewConfig.semantic.model
                         ? ["--model", viewConfig.semantic.model]
                         : []),
+                    ...(fusion ? ["--blocks"] : []),
                 ]
                 try {
-                    const semanticOutput = await new Promise<string>((resolve, reject) => {
+                    semanticOutput = await new Promise<string>((resolve, reject) => {
                         execFile(
                             viewConfig.pythonPath || "python3",
                             semanticArgs,
@@ -215,19 +303,23 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                             },
                         )
                     })
-                    return truncateOutput(
-                        `**VCC semantic matches for \`${query}\`:**\n\n` +
-                            semanticOutput +
-                            `\n\nExport: ${exportPath}`,
-                        "more matches — narrow the query or read the export",
-                        maxReturnChars,
-                    )
+                    if (!fusion) {
+                        return truncateOutput(
+                            `**VCC semantic matches for \`${query}\`:**\n\n` +
+                                semanticOutput +
+                                `\n\nExport: ${exportPath}`,
+                            "more matches — narrow the query or read the export",
+                            maxReturnChars,
+                        )
+                    }
                 } catch (err: any) {
                     console.warn(
                         `[vcc-semantic] unavailable, falling back to BM25: ${err?.message}`,
                     )
                     semanticNote = `(semantic unavailable — ${err?.message}; showing BM25)`
                 }
+            } else if (query && fusion) {
+                semanticNote = "(hybrid unavailable — semantic search disabled; showing BM25)"
             }
 
             // Run VCC grep
@@ -237,8 +329,7 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                 ...(ref ? ["--ref", ref] : query ? ["--search", query] : ["--grep", pattern]),
                 "--limit",
                 String(limit ?? 40),
-                "--offset",
-                String(offset ?? 0),
+                ...(fusion ? ["--sec-level"] : ["--offset", String(offset ?? 0)]),
                 ...(query || ref ? [] : ["--order", String(order ?? "newest")]),
                 ...(brief === true ? ["--brief"] : []),
                 "--from-line",
@@ -258,6 +349,10 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                         resolve(stdout || "")
                     }
                 })
+            }).catch((err: any) => {
+                if (!fusion) throw err
+                console.warn(`[vcc] hybrid child failed, falling back to semantic: ${err?.message}`)
+                return ""
             })
 
             if (!query && !ref) {
@@ -289,6 +384,46 @@ export function createViewTool(ctx: ToolContext): ReturnType<typeof tool> {
                     `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
                     `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}\n` +
                     `Compiler output:\n${truncateOutput(output, "compiler output truncated", maxReturnChars)}`
+                )
+            }
+
+            // Hybrid fusion: merge BM25 (sec-level) + semantic (blocks) by RRF
+            if (query && fusion) {
+                const bm25Entries = output.trim() ? parseFusionOutput(output, "bm25") : []
+                const semEntries = semanticOutput ? parseFusionOutput(semanticOutput, "sem") : []
+                if (semanticNote && bm25Entries.length === 0 && semEntries.length === 0) {
+                    return (
+                        `VCC hybrid search for \`${query}\` found no matches in the current session view.\n` +
+                        `${semanticNote}\n` +
+                        `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}\n` +
+                        `Brief view: ${exportPath.replace(/\.jsonl$/, ".min.txt")}`
+                    )
+                }
+                const fused = fuseEntries([bm25Entries, semEntries])
+                const fusedLimit = limit ?? 40
+                const lines: string[] = [`**VCC hybrid search for \`${query}\`:**`]
+                if (semanticNote) lines.push("", semanticNote)
+                if (fused.length === 0) {
+                    lines.push("", "no matching blocks.")
+                }
+                for (const hit of fused.slice(0, fusedLimit)) {
+                    lines.push("")
+                    const b25 = hit.bm25 != null ? hit.bm25.toFixed(2) : "-"
+                    const sem = hit.sem != null ? hit.sem.toFixed(2) : "-"
+                    lines.push(
+                        `(${hit.entry.txt}:${hit.entry.start}-${hit.entry.end}) [hybrid] rrf=${hit.rrf.toFixed(3)} bm25=${b25} sem=${sem}`,
+                    )
+                    if (hit.sem != null) {
+                        for (const pl of (hit.semPreview || []).slice(0, 2)) {
+                            lines.push("  " + pl)
+                        }
+                    }
+                }
+                lines.push("", `Full transcript: ${exportPath.replace(/\.jsonl$/, ".txt")}`)
+                return truncateOutput(
+                    lines.join("\n"),
+                    "more matches — narrow the query or read the export",
+                    maxReturnChars,
                 )
             }
 

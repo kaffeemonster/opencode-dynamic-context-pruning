@@ -1367,7 +1367,7 @@ def _node_prior(o, cur_tool, content_lines):
     return 0
 
 def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False,
-                offset=0, from_line=0, context=0):
+                offset=0, from_line=0, context=0, sec_level=False):
     query_terms = _analyze(query)
     if not query_terms:
         print("No searchable terms in query.")
@@ -1458,6 +1458,60 @@ def bm25_search(results, query, limit=0, brief=False, fusion=False, bm25l=False,
         def _score_of(i):
             return scores[i] + _PRIOR_SCALE * corpus[i][2]
 
+    if sec_level and not fusion:
+        sec_span = {}
+        for filepath, ir in results:
+            for o in ir:
+                s = o.get("_sec")
+                if s is None:
+                    continue
+                sl = o.get("start_line", 0)
+                el = o.get("end_line", 0)
+                key = (filepath, s)
+                a = sec_span.setdefault(key, [None, None])
+                a[0] = sl if a[0] is None else min(a[0], sl)
+                a[1] = el if a[1] is None else max(a[1], el)
+        sec_best = {}
+        for i in ranked:
+            sc = _score_of(i)
+            if sc <= 0:
+                continue
+            filepath, o, prior, ts = corpus[i]
+            s = o.get("_sec")
+            if s is None:
+                continue
+            key = (filepath, s)
+            if key not in sec_best or sc > sec_best[key][0]:
+                fs, fe = sec_span.get(key, (o.get("start_line", 0), o.get("end_line", 0)))
+                sec_best[key] = (sc, fs, fe, i)
+        ranked_secs = sorted(sec_best.keys(), key=lambda k: -sec_best[k][0])
+        count = 0
+        first = True
+        for key in ranked_secs:
+            filepath, s = key
+            sc, sl, el, best_i = sec_best[key]
+            count += 1
+            if offset and count <= offset:
+                continue
+            _, o, prior, ts = corpus[best_i]
+            short = _rel_path(filepath)
+            ts_suffix = f" event={ts}" if ts else ""
+            start = sl + 1
+            end = el + 1
+            if from_line and start < from_line:
+                continue
+            if not first:
+                print()
+            first = False
+            print(f"({short}:{start}-{end}) [{o['type']}] score={sc:.2f}{ts_suffix}")
+            src = o.get("content_brief") if brief else o.get("content")
+            n_ctx = max(8, context) if context else 8
+            for line in (src or [])[:n_ctx]:
+                print(f"   {line}")
+            if limit and count - offset >= limit:
+                return
+        return
+
     count = 0
     first = True
     for i in ranked:
@@ -1502,6 +1556,7 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
 
     results, paths = [], []
     map_entries = {}
+    all_blocks = []
 
     for i, chain in enumerate(chains):
         sfx = f"_{i+1}" if len(chains) > 1 else ""
@@ -1534,6 +1589,19 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
                     map_entries.setdefault(o["_msg_id"], []).append({
                         "txt": ffn, "start": sl + 1, "end": el + 1
                     })
+        sec_msg = {}
+        for o in ir:
+            if o["type"] == "meta_header" and o.get("_sec") is not None:
+                sec_msg.setdefault(o["_sec"], o.get("_msg_id"))
+        blocks = []
+        for s, (sl, el) in sec_lines.items():
+            blocks.append({
+                "txt": ffn,
+                "start": sl + 1,
+                "end": el + 1,
+                "msg_ids": [mid] if (mid := sec_msg.get(s)) else [],
+            })
+        all_blocks.extend(blocks)
         lower_brief(ir, truncate, ffn, truncate_user)
 
         full = emit(ir, "content")
@@ -1560,10 +1628,10 @@ def compile_pass(input_path, output_dir=None, truncate=128, truncate_user=256,
         paths.append((fp, mp, vp if grep_pattern else None,
                        len(full), _cnt(ft), len(brief), _cnt(bt)))
 
-    if map_entries:
+    if map_entries or all_blocks:
         map_path = os.path.join(output_dir, base + ".map.json")
         with open(map_path, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "sections": map_entries}, f)
+            json.dump({"version": 1, "sections": map_entries, "blocks": all_blocks}, f)
 
     if not quiet:
         for fp, _, _, fl, fw, _, _ in paths:
@@ -1610,6 +1678,8 @@ def main():
                    help="Include N context lines around each match (grep) or show up to N lines (search)")
     p.add_argument("--search", metavar="QUERY",
                    help="BM25 text search (instead of regex grep)")
+    p.add_argument("--sec-level", action="store_true",
+                   help="Fold BM25 results to per-section (message) level")
     p.add_argument("--fusion", action="store_true",
                    help="RRF-fuse full and brief BM25F ranked lists (k=60)")
     p.add_argument("--bm25l", action="store_true",
@@ -1636,7 +1706,7 @@ def main():
                     a.from_line, a.context)
     if a.search:
         bm25_search(all_results, a.search, a.limit, a.brief, a.fusion, a.bm25l,
-                    a.offset, a.from_line, a.context)
+                    a.offset, a.from_line, a.context, sec_level=a.sec_level)
     if a.ref:
         ref_locate(all_results, a.ref, a.limit)
 

@@ -229,6 +229,8 @@ def main():
     p.add_argument("--map", default=None,
                    help="path to section map json (default: next to export)")
     p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--blocks", action="store_true",
+                   help="Fold results to per-section blocks using map.json blocks array")
     a = p.parse_args()
 
     export_path = a.export
@@ -313,11 +315,13 @@ def main():
     # ── section map: msg_id → .txt line span ──
     map_path = a.map or (os.path.splitext(export_path)[0] + ".map.json")
     sec_map = {}
+    blocks = []
     if os.path.exists(map_path):
         try:
             _sm = json.load(open(map_path, encoding="utf-8"))
             sec_map = _sm.get("sections", {})
-            sys.stderr.write(f"vcc-semantic: using section map ({len(sec_map)} ids)\n")
+            blocks = _sm.get("blocks", [])
+            sys.stderr.write(f"vcc-semantic: using section map ({len(sec_map)} ids, {len(blocks)} blocks)\n")
             sys.stderr.flush()
         except Exception:
             sec_map = {}
@@ -396,27 +400,66 @@ def main():
     limit = a.limit if a.limit and a.limit > 0 else 0
     short = _rel_path(export_path)
     out = []
-    count = 0
-    for k in ranked:
-        sc = sims[k]
-        if sc <= 0:
-            continue
-        if limit and count >= limit:
-            break
-        if count:
-            out.append("")
-        it = items[k]
-        ref = None
-        mids = sec_map.get(it.get("msg_id"))
-        if mids:
-            m0 = mids[0]
-            ref = f"({_rel_path(m0['txt'])}:{m0['start']}-{m0['end']})"
-        if ref is None:
-            ref = f"({short}:{it['line']})"
-        out.append(f"{ref} [semantic] score={sc:.2f}")
-        for line in _preview(items[k]["text"]):
-            out.append("  " + line)
-        count += 1
+
+    if a.blocks:
+        blk_by_msg = {}
+        for b in blocks:
+            for mid in b.get("msg_ids") or []:
+                blk_by_msg.setdefault(mid, b)
+        blk_best = {}
+        for k in ranked:
+            sc = sims[k]
+            if sc <= 0:
+                continue
+            rec = items[k]
+            b = blk_by_msg.get(rec.get("msg_id"))
+            if b is None:
+                key = ("__rec__", rec.get("line"), k)
+                if key not in blk_best or sc > blk_best[key][0]:
+                    blk_best[key] = (sc, rec)
+                continue
+            key = (b.get("txt"), b.get("start"), b.get("end"))
+            if key not in blk_best or sc > blk_best[key][0]:
+                blk_best[key] = (sc, rec)
+        ranked_blks = sorted(blk_best.keys(), key=lambda key: -blk_best[key][0])
+        count = 0
+        for key in ranked_blks:
+            sc, rec = blk_best[key]
+            if limit and count >= limit:
+                break
+            if count:
+                out.append("")
+            if key[0] == "__rec__":
+                line_no = key[1]
+                ref = f"({short}:{line_no})"
+            else:
+                ref = f"({key[0]}:{key[1]}-{key[2]})"
+            out.append(f"{ref} [semantic] score={sc:.2f}")
+            for line in _preview(rec["text"]):
+                out.append("  " + line)
+            count += 1
+    else:
+        count = 0
+        for k in ranked:
+            sc = sims[k]
+            if sc <= 0:
+                continue
+            if limit and count >= limit:
+                break
+            if count:
+                out.append("")
+            it = items[k]
+            ref = None
+            mids = sec_map.get(it.get("msg_id"))
+            if mids:
+                m0 = mids[0]
+                ref = f"({_rel_path(m0['txt'])}:{m0['start']}-{m0['end']})"
+            if ref is None:
+                ref = f"({short}:{it['line']})"
+            out.append(f"{ref} [semantic] score={sc:.2f}")
+            for line in _preview(items[k]["text"]):
+                out.append("  " + line)
+            count += 1
     if out:
         print("\n".join(out))
 
